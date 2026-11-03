@@ -1,3 +1,5 @@
+-- Catalog only. Bulk market data lives in Parquet files under data/.
+
 CREATE TABLE IF NOT EXISTS symbols (
   symbol TEXT PRIMARY KEY,
   dukascopy_id TEXT NOT NULL,
@@ -25,11 +27,52 @@ CREATE TABLE IF NOT EXISTS download_days (
   PRIMARY KEY (symbol, provider, day)
 );
 
-CREATE TABLE IF NOT EXISTS jobs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,
-  payload TEXT,
+-- Per-hour status for resume without redownloading successful hours.
+CREATE TABLE IF NOT EXISTS download_hours (
+  symbol TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'dukascopy',
+  day TEXT NOT NULL,
+  hour INTEGER NOT NULL,
   status TEXT NOT NULL,
+  tick_count INTEGER DEFAULT 0,
+  http_status INTEGER,
+  attempts INTEGER DEFAULT 0,
+  error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (symbol, provider, day, hour)
+);
+
+-- Multi-day / multi-symbol download jobs (survive process restart).
+CREATE TABLE IF NOT EXISTS download_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'range',
+  symbols_json TEXT NOT NULL,
+  start_day TEXT NOT NULL,
+  end_day TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'dukascopy',
+  status TEXT NOT NULL,
+  progress_json TEXT,
+  current_symbol TEXT,
+  current_day TEXT,
+  current_hour INTEGER,
+  retry_count INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 3,
+  error TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_range
+  ON download_jobs (symbols_json, start_day, end_day, provider)
+  WHERE status IN ('QUEUED', 'RUNNING', 'PAUSED');
+
+CREATE TABLE IF NOT EXISTS job_day_results (
+  job_id INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  day TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, symbol, day),
+  FOREIGN KEY (job_id) REFERENCES download_jobs(id)
 );

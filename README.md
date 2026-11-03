@@ -58,3 +58,15 @@ Private project — all rights reserved.
 - Raw ticks + true 1s mid OHLC Parquet
 - SQLite catalog with hour classifications
 - Pilot: `python -m scripts.pilot_us30_day --date YYYY-MM-DD`
+
+
+## Phase 2A — multi-day jobs
+
+```bash
+python -m scripts.run_range_job --symbol US30 --start 2024-06-10 --end 2024-06-12
+```
+
+- Skips days with tick+bars SUCCESS
+- Hour-level resume for incomplete days
+- Job states: QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, CANCELLED
+- Restart recovery: RUNNING → QUEUED

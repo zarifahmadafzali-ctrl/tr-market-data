@@ -171,35 +171,59 @@ async def download_day(
     day: date,
     *,
     client: httpx.AsyncClient | None = None,
+    hours: list[int] | None = None,
+    seed_hour_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Download selected hours (default 0..23).
+
+    seed_hour_results: prior SUCCESS/EXPECTED_EMPTY hour dicts to merge for day classification
+    without re-fetching.
+    """
     own = client is None
     if own:
         client = httpx.AsyncClient(headers={"User-Agent": "tr-market-data/0.1"})
     assert client is not None
-    hours: list[dict[str, Any]] = []
+    target_hours = list(range(24) if hours is None else hours)
+    hour_results: list[dict[str, Any]] = list(seed_hour_results or [])
     try:
-        for hour in range(24):
-            hours.append(await download_hour_ticks(symbol, day, hour, client))
+        for hour in target_hours:
+            hour_results.append(await download_hour_ticks(symbol, day, hour, client))
     finally:
         if own:
             await client.aclose()
 
+    # Dedupe by hour (last write wins)
+    by_hour: dict[int, dict[str, Any]] = {}
+    for h in hour_results:
+        by_hour[int(h["hour"])] = h
+    hours_list = [by_hour[h] for h in sorted(by_hour)]
+
     all_ticks: list[dict[str, Any]] = []
-    for h in hours:
-        all_ticks.extend(h["ticks"])
+    for h in hours_list:
+        all_ticks.extend(h.get("ticks") or [])
     all_ticks.sort(key=lambda t: t["time"])
 
-    ok = sum(1 for h in hours if h["classification"] == "SUCCESS")
-    empty = sum(1 for h in hours if h["classification"] == "EXPECTED_EMPTY")
-    failed = sum(1 for h in hours if h["classification"] == "FAILED")
-    day_status = classify_day(hours)
+    ok = sum(1 for h in hours_list if h["classification"] == "SUCCESS")
+    empty = sum(1 for h in hours_list if h["classification"] == "EXPECTED_EMPTY")
+    failed = sum(1 for h in hours_list if h["classification"] == "FAILED")
+    # Only classify over hours we know about; missing hours → incomplete → FAILED if expected 24
+    if hours is not None and len(by_hour) < 24:
+        # incomplete day until all 24 classified
+        if failed:
+            day_status = "FAILED"
+        elif ok or empty:
+            day_status = "INCOMPLETE"
+        else:
+            day_status = "MISSING"
+    else:
+        day_status = classify_day(hours_list)
 
     return {
         "symbol": normalize_symbol(symbol),
         "request_symbol": symbol,
         "day": day.isoformat(),
         "status": day_status,
-        "hours": hours,
+        "hours": hours_list,
         "ticks": all_ticks,
         "tick_count": len(all_ticks),
         "successful_hours": ok,
