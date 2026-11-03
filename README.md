@@ -70,3 +70,30 @@ python -m scripts.run_range_job --symbol US30 --start 2024-06-10 --end 2024-06-1
 - Hour-level resume for incomplete days
 - Job states: QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, CANCELLED
 - Restart recovery: RUNNING → QUEUED
+
+
+## Phase 2B — Telegram bot (admin-only)
+
+Environment (`.env`, never commit):
+
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ADMIN_IDS=1675868882
+SQLITE_PATH=db/tr_market_data.sqlite
+DATA_ROOT=data
+BOT_PUBLIC_ACCESS=false
+```
+
+Start bot (receives Telegram updates):
+
+```bash
+python -m bot.app
+```
+
+Start worker (processes QUEUED download jobs):
+
+```bash
+python -m bot.worker
+```
+
+Commands: `/start` `/status` `/symbols` `/get` `/jobs` `/cancel` `/help`

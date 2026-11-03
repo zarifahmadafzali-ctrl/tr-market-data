@@ -1,6 +1,10 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("pyarrow")
+
 from db.catalog import connect, get_day, upsert_day
 from processor.ohlc import ticks_to_seconds
 from storage.parquet_io import read_bars_parquet, read_ticks_parquet, write_bars_parquet, write_ticks_parquet
