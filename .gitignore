@@ -18,3 +18,7 @@ data/cache/**
 .mypy_cache/
 dist/
 build/
+
+# Hive-style market data outputs
+data/provider=*/
+data/_t.parquet
