@@ -1,7 +1,6 @@
-# TRMarketDataBot — free-tier friendly starter stack
 httpx>=0.27.0
-python-telegram-bot>=21.0
 pandas>=2.2.0
 pyarrow>=15.0.0
 python-dotenv>=1.0.0
-apscheduler>=3.10.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

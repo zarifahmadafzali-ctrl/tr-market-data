@@ -1,4 +1,3 @@
--- Catalog only. Bulk market data lives in Parquet files under data/.
 CREATE TABLE IF NOT EXISTS symbols (
   symbol TEXT PRIMARY KEY,
   dukascopy_id TEXT NOT NULL,
@@ -8,15 +7,22 @@ CREATE TABLE IF NOT EXISTS symbols (
 
 CREATE TABLE IF NOT EXISTS download_days (
   symbol TEXT NOT NULL,
-  day TEXT NOT NULL,              -- YYYY-MM-DD (UTC calendar day for catalog)
-  status TEXT NOT NULL,            -- pending|running|success|expected_empty|failed
-  ticks INTEGER DEFAULT 0,
-  bars_1s INTEGER DEFAULT 0,
-  raw_path TEXT,
-  parquet_path TEXT,
+  provider TEXT NOT NULL DEFAULT 'dukascopy',
+  day TEXT NOT NULL,
+  status TEXT NOT NULL,
+  tick_status TEXT,
+  bars_1s_status TEXT,
+  tick_count INTEGER DEFAULT 0,
+  bars_1s_count INTEGER DEFAULT 0,
+  successful_hours INTEGER DEFAULT 0,
+  empty_hours INTEGER DEFAULT 0,
+  failed_hours INTEGER DEFAULT 0,
+  tick_file_path TEXT,
+  bars_1s_file_path TEXT,
+  metadata_path TEXT,
   error TEXT,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (symbol, day)
+  PRIMARY KEY (symbol, provider, day)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (

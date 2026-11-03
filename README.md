@@ -50,3 +50,11 @@ Scaffold only. Pilot downloader for US30 is the next executable step.
 ## License
 
 Private project — all rights reserved.
+
+
+## Phase 1 status
+
+- Dukascopy historical tick download (ported logic)
+- Raw ticks + true 1s mid OHLC Parquet
+- SQLite catalog with hour classifications
+- Pilot: `python -m scripts.pilot_us30_day --date YYYY-MM-DD`

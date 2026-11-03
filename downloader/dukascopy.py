@@ -1,115 +1,208 @@
-"""
-Dukascopy historical tick downloader (pilot).
-
-Notes:
-- Dukascopy historical URL months are zero-based (January = 00).
-- Be polite: sequential hours, retries, backoff on HTTP 429.
-- This module only downloads raw hourly .bi5 payloads; decoding is separate.
-"""
+"""Dukascopy historical tick hour downloader with 429 backoff."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import date, datetime, timezone
+from typing import Any
 
 import httpx
 
+from downloader.parse import decompress, parse_ticks
+from downloader.symbols import normalize_symbol, point_divisor
+
 log = logging.getLogger(__name__)
 
-# Common index CFD id used by Dukascopy for Dow-like feeds.
-DEFAULT_SYMBOLS = {
-    "US30": "US30IDXUSD",
-}
+BASE_URL = "https://datafeed.dukascopy.com/datafeed"
+_429_BACKOFF = (2.0, 5.0, 10.0, 20.0)
+_MAX_RETRY_AFTER = 60.0
+_MAX_429_ATTEMPTS = 5
+_MAX_OTHER_ATTEMPTS = 3
+_INTER_REQUEST_DELAY = 0.35
 
 
-@dataclass
-class HourJob:
-    symbol: str
-    dukascopy_id: str
-    day: date
-    hour: int
-
-
-def dukascopy_hour_url(dukascopy_id: str, day: date, hour: int) -> str:
-    # Month is zero-based in Dukascopy paths.
+def hour_url(dukascopy_id: str, day: date, hour: int) -> str:
+    # Zero-based month in Dukascopy historical paths (June → 05).
     return (
-        f"https://datafeed.dukascopy.com/datafeed/"
-        f"{dukascopy_id}/{day.year}/{day.month - 1:02d}/{day.day:02d}/"
-        f"{hour:02d}h_ticks.bi5"
+        f"{BASE_URL}/{dukascopy_id}/{day.year}/{day.month - 1:02d}/"
+        f"{day.day:02d}/{hour:02d}h_ticks.bi5"
     )
 
 
-async def download_hour(
-    client: httpx.AsyncClient,
-    job: HourJob,
-    dest: Path,
-    *,
-    min_interval_sec: float = 0.35,
-    max_retries: int = 5,
-) -> tuple[str, int]:
-    """
-    Returns (status, nbytes)
-    status: success | expected_empty | failed
-    """
-    url = dukascopy_hour_url(job.dukascopy_id, job.day, job.hour)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    last_err = ""
-    for attempt in range(max_retries):
-        try:
-            await asyncio.sleep(min_interval_sec)
-            r = await client.get(url, timeout=60.0)
-            if r.status_code in (404, 204):
-                return "expected_empty", 0
-            if r.status_code == 429:
-                wait = min(60.0, (2**attempt) * 2.0)
-                ra = r.headers.get("Retry-After")
-                if ra and ra.isdigit():
-                    wait = max(wait, float(ra))
-                log.warning("429 for %s — sleep %.1fs", url, wait)
-                await asyncio.sleep(wait)
-                continue
-            if r.status_code >= 400:
-                last_err = f"HTTP {r.status_code}"
-                await asyncio.sleep(1.0 + attempt)
-                continue
-            data = r.content
-            if not data:
-                return "expected_empty", 0
-            dest.write_bytes(data)
-            return "success", len(data)
-        except Exception as e:  # noqa: BLE001 — pilot network path
-            last_err = str(e)
-            await asyncio.sleep(1.0 + attempt)
-    log.error("hour failed %s: %s", url, last_err)
-    return "failed", 0
+def hour_start_unix(day: date, hour: int) -> float:
+    dt = datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
-async def download_day_hours(
+async def download_hour_ticks(
     symbol: str,
     day: date,
-    out_dir: Path,
+    hour: int,
+    client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    """Download and parse one hour of ticks.
+
+    Returns classification SUCCESS | EXPECTED_EMPTY | FAILED plus ticks list.
+    """
+    sym = normalize_symbol(symbol)
+    url = hour_url(sym, day, hour)
+    divisor = point_divisor(sym)
+    h0 = hour_start_unix(day, hour)
+    last_error = ""
+    last_status = 0
+    attempt = 0
+    max_attempts = _MAX_429_ATTEMPTS
+
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            if attempt > 1 or hour > 0:
+                await asyncio.sleep(_INTER_REQUEST_DELAY)
+            resp = await client.get(url, timeout=60.0)
+            last_status = resp.status_code
+
+            if resp.status_code in (404, 204):
+                return {
+                    "hour": hour,
+                    "ticks": [],
+                    "status": resp.status_code,
+                    "classification": "EXPECTED_EMPTY",
+                    "error": "no file",
+                    "attempts": attempt,
+                    "url": url,
+                }
+
+            if resp.status_code == 429:
+                last_error = "HTTP 429 Too Many Requests"
+                if attempt >= _MAX_429_ATTEMPTS:
+                    break
+                delay = _429_BACKOFF[min(attempt - 1, len(_429_BACKOFF) - 1)]
+                ra = resp.headers.get("Retry-After")
+                if ra:
+                    try:
+                        delay = max(delay, min(_MAX_RETRY_AFTER, float(ra)))
+                    except ValueError:
+                        pass
+                log.warning("429 %s — sleep %.1fs (attempt %s)", url, delay, attempt)
+                await asyncio.sleep(delay)
+                continue
+
+            # Transient upstream errors (common on Dukascopy under load)
+            if resp.status_code in (502, 503, 504):
+                last_error = f"HTTP {resp.status_code}"
+                if attempt >= _MAX_429_ATTEMPTS:
+                    break
+                delay = _429_BACKOFF[min(attempt - 1, len(_429_BACKOFF) - 1)]
+                await asyncio.sleep(delay)
+                continue
+
+            if resp.status_code >= 400:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt >= _MAX_OTHER_ATTEMPTS:
+                    break
+                await asyncio.sleep(0.8 * attempt)
+                continue
+
+            raw = resp.content or b""
+            if not raw:
+                return {
+                    "hour": hour,
+                    "ticks": [],
+                    "status": resp.status_code,
+                    "classification": "EXPECTED_EMPTY",
+                    "error": "empty body",
+                    "attempts": attempt,
+                    "url": url,
+                }
+
+            try:
+                decoded = decompress(raw)
+                ticks = parse_ticks(decoded, h0, divisor)
+            except Exception as e:  # noqa: BLE001
+                last_error = f"decode: {e}"
+                if attempt >= _MAX_OTHER_ATTEMPTS:
+                    break
+                await asyncio.sleep(0.5 * attempt)
+                continue
+
+            return {
+                "hour": hour,
+                "ticks": ticks,
+                "status": resp.status_code,
+                "classification": "SUCCESS" if ticks else "EXPECTED_EMPTY",
+                "error": None if ticks else "no ticks after parse",
+                "attempts": attempt,
+                "url": url,
+            }
+        except Exception as e:  # noqa: BLE001
+            last_error = str(e)
+            if attempt >= _MAX_OTHER_ATTEMPTS:
+                break
+            await asyncio.sleep(1.0 + attempt)
+
+    return {
+        "hour": hour,
+        "ticks": [],
+        "status": last_status,
+        "classification": "FAILED",
+        "error": last_error or "unknown",
+        "attempts": attempt,
+        "url": url,
+    }
+
+
+def classify_day(hour_results: list[dict[str, Any]]) -> str:
+    """Day status from hour classifications. Any FAILED → FAILED."""
+    if not hour_results:
+        return "MISSING"
+    classes = [h["classification"] for h in hour_results]
+    if any(c == "FAILED" for c in classes):
+        return "FAILED"
+    if all(c == "EXPECTED_EMPTY" for c in classes):
+        return "EXPECTED_EMPTY"
+    if any(c == "SUCCESS" for c in classes):
+        return "SUCCESS"
+    return "MISSING"
+
+
+async def download_day(
+    symbol: str,
+    day: date,
     *,
-    dukascopy_id: str | None = None,
-    min_interval_sec: float = 0.35,
-) -> dict:
-    dc_id = dukascopy_id or DEFAULT_SYMBOLS.get(symbol.upper())
-    if not dc_id:
-        raise ValueError(f"Unknown symbol mapping: {symbol}")
-    results = {"symbol": symbol, "day": day.isoformat(), "hours": {}, "bytes": 0, "failed": 0, "ok": 0, "empty": 0}
-    async with httpx.AsyncClient(headers={"User-Agent": "tr-market-data/0.1"}) as client:
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    own = client is None
+    if own:
+        client = httpx.AsyncClient(headers={"User-Agent": "tr-market-data/0.1"})
+    assert client is not None
+    hours: list[dict[str, Any]] = []
+    try:
         for hour in range(24):
-            job = HourJob(symbol=symbol, dukascopy_id=dc_id, day=day, hour=hour)
-            dest = out_dir / symbol.upper() / day.isoformat() / f"{hour:02d}h_ticks.bi5"
-            status, nbytes = await download_hour(client, job, dest, min_interval_sec=min_interval_sec)
-            results["hours"][f"{hour:02d}"] = status
-            results["bytes"] += nbytes
-            if status == "success":
-                results["ok"] += 1
-            elif status == "expected_empty":
-                results["empty"] += 1
-            else:
-                results["failed"] += 1
-    return results
+            hours.append(await download_hour_ticks(symbol, day, hour, client))
+    finally:
+        if own:
+            await client.aclose()
+
+    all_ticks: list[dict[str, Any]] = []
+    for h in hours:
+        all_ticks.extend(h["ticks"])
+    all_ticks.sort(key=lambda t: t["time"])
+
+    ok = sum(1 for h in hours if h["classification"] == "SUCCESS")
+    empty = sum(1 for h in hours if h["classification"] == "EXPECTED_EMPTY")
+    failed = sum(1 for h in hours if h["classification"] == "FAILED")
+    day_status = classify_day(hours)
+
+    return {
+        "symbol": normalize_symbol(symbol),
+        "request_symbol": symbol,
+        "day": day.isoformat(),
+        "status": day_status,
+        "hours": hours,
+        "ticks": all_ticks,
+        "tick_count": len(all_ticks),
+        "successful_hours": ok,
+        "empty_hours": empty,
+        "failed_hours": failed,
+    }

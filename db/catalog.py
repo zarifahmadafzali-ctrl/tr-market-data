@@ -1,10 +1,11 @@
-"""SQLite catalog for symbols and per-day download status."""
+"""SQLite catalog for download day status."""
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 SCHEMA = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
 
@@ -36,32 +37,55 @@ def upsert_symbol(conn: sqlite3.Connection, symbol: str, dukascopy_id: str, desc
     conn.commit()
 
 
-def set_day_status(
-    conn: sqlite3.Connection,
-    symbol: str,
-    day: str,
-    status: str,
-    *,
-    ticks: int = 0,
-    bars_1s: int = 0,
-    raw_path: str | None = None,
-    parquet_path: str | None = None,
-    error: str | None = None,
-) -> None:
+def upsert_day(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     conn.execute(
         """
         INSERT INTO download_days (
-          symbol, day, status, ticks, bars_1s, raw_path, parquet_path, error, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, day) DO UPDATE SET
+          symbol, provider, day, status, tick_status, bars_1s_status,
+          tick_count, bars_1s_count, successful_hours, empty_hours, failed_hours,
+          tick_file_path, bars_1s_file_path, metadata_path, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, provider, day) DO UPDATE SET
           status = excluded.status,
-          ticks = excluded.ticks,
-          bars_1s = excluded.bars_1s,
-          raw_path = COALESCE(excluded.raw_path, download_days.raw_path),
-          parquet_path = COALESCE(excluded.parquet_path, download_days.parquet_path),
+          tick_status = excluded.tick_status,
+          bars_1s_status = excluded.bars_1s_status,
+          tick_count = excluded.tick_count,
+          bars_1s_count = excluded.bars_1s_count,
+          successful_hours = excluded.successful_hours,
+          empty_hours = excluded.empty_hours,
+          failed_hours = excluded.failed_hours,
+          tick_file_path = excluded.tick_file_path,
+          bars_1s_file_path = excluded.bars_1s_file_path,
+          metadata_path = excluded.metadata_path,
           error = excluded.error,
           updated_at = excluded.updated_at
         """,
-        (symbol, day, status, ticks, bars_1s, raw_path, parquet_path, error, utc_now()),
+        (
+            row["symbol"],
+            row.get("provider", "dukascopy"),
+            row["day"],
+            row["status"],
+            row.get("tick_status"),
+            row.get("bars_1s_status"),
+            int(row.get("tick_count") or 0),
+            int(row.get("bars_1s_count") or 0),
+            int(row.get("successful_hours") or 0),
+            int(row.get("empty_hours") or 0),
+            int(row.get("failed_hours") or 0),
+            row.get("tick_file_path"),
+            row.get("bars_1s_file_path"),
+            row.get("metadata_path"),
+            row.get("error"),
+            utc_now(),
+        ),
     )
     conn.commit()
+
+
+def get_day(conn: sqlite3.Connection, symbol: str, day: str, provider: str = "dukascopy") -> dict[str, Any] | None:
+    cur = conn.execute(
+        "SELECT * FROM download_days WHERE symbol = ? AND provider = ? AND day = ?",
+        (symbol, provider, day),
+    )
+    r = cur.fetchone()
+    return dict(r) if r else None
