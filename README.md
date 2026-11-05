@@ -97,3 +97,43 @@ python -m bot.worker
 ```
 
 Commands: `/start` `/status` `/symbols` `/get` `/jobs` `/cancel` `/help`
+
+## Render (Free Web Service) — single process
+
+Render **Web Service** requires an open HTTP port. Running only `python -m bot.app`
+will poll Telegram but eventually fail with *No open ports detected* / *Timed Out*.
+
+Use the combined entrypoint (health + Telegram bot + download worker):
+
+**Build Command**
+```
+pip install -r requirements.txt
+```
+
+**Start Command**
+```
+python -m bot.web
+```
+
+**Environment**
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ADMIN_IDS=1675868882
+SQLITE_PATH=db/tr_market_data.sqlite
+DATA_ROOT=data
+BOT_PUBLIC_ACCESS=false
+```
+
+Health check URL: `https://<your-service>.onrender.com/health`
+
+Notes (Render Free):
+- Service may **sleep** after inactivity; first Telegram reply can be slow after wake.
+- Disk is **ephemeral** — Parquet/SQLite can be lost on redeploy or restart. Plan durable storage later.
+- Run **one** instance only (Telegram allows a single `getUpdates` consumer).
+- Prefer a **separate** Render account/workspace from Trading Replay so free hours are not shared.
+
+Local equivalent of production start:
+```
+python -m bot.web
+```
+
