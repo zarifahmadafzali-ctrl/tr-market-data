@@ -173,6 +173,7 @@ async def download_day(
     client: httpx.AsyncClient | None = None,
     hours: list[int] | None = None,
     seed_hour_results: list[dict[str, Any]] | None = None,
+    on_hour: Any | None = None,
 ) -> dict[str, Any]:
     """Download selected hours (default 0..23).
 
@@ -187,7 +188,13 @@ async def download_day(
     hour_results: list[dict[str, Any]] = list(seed_hour_results or [])
     try:
         for hour in target_hours:
-            hour_results.append(await download_hour_ticks(symbol, day, hour, client))
+            hr = await download_hour_ticks(symbol, day, hour, client)
+            hour_results.append(hr)
+            if on_hour is not None:
+                try:
+                    on_hour(hr)
+                except Exception:
+                    pass
     finally:
         if own:
             await client.aclose()

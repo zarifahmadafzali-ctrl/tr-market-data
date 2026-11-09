@@ -19,7 +19,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from bot.config import data_root, sqlite_path, telegram_token
+from bot.archive import archive_tick, recover_stale_uploading, reconcile_success_days
+from bot.config import archive_enabled, data_root, sqlite_path, telegram_token, archive_channel_id
 from scheduler.jobs import recover_stale_running_jobs
 from scheduler.runner import DownloadScheduler
 
@@ -78,14 +79,31 @@ def _run_worker() -> None:
         recover_stale_running_jobs(db)
     except Exception as e:
         log.exception("recover_stale_running_jobs failed: %s", e)
+    if archive_enabled():
+        try:
+            n = recover_stale_uploading(db)
+            log.info("Archive recovery: %s row(s); channel_id=%s", n, archive_channel_id())
+            reconcile_success_days(db)
+        except Exception as e:
+            log.exception("archive recovery failed: %s", e)
+    else:
+        log.info("Telegram archive disabled (TELEGRAM_ARCHIVE_ENABLED not true)")
     sched = DownloadScheduler(db, data)
-    log.info("Worker loop started db=%s data=%s", db, data)
+    log.info("Worker loop started db=%s data=%s archive=%s", db, data, archive_enabled())
     while not _stop.is_set():
         try:
             result = sched.tick()
             if result:
                 log.info("Job finished: %s", result.get("status"))
-            else:
+            arch = None
+            if archive_enabled():
+                try:
+                    arch = archive_tick(db)
+                    if arch:
+                        log.info("Archive step: %s", arch.get("status"))
+                except Exception as e:
+                    log.exception("archive tick error: %s", e)
+            if not result and not arch:
                 _stop.wait(5)
         except Exception as e:
             log.exception("Worker tick error: %s", e)

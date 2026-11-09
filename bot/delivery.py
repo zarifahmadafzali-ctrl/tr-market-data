@@ -56,10 +56,35 @@ def catalog_files_for_day(
     def add(path_str: str | None, label: str) -> None:
         if not path_str:
             return
-        p = Path(path_str)
-        if not p.is_absolute():
-            p = root / p
-        safe = _safe_resolve(p, root)
+        raw = Path(path_str)
+        candidates: list[Path] = []
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            # Preferred: path relative to data root (provider=.../ticks.parquet)
+            candidates.append(root / raw)
+            # Legacy pilot rows stored "data/provider=..." while root is already .../data
+            parts = raw.parts
+            if parts and parts[0] == "data":
+                candidates.append(root / Path(*parts[1:]))
+            # Relative to project root (parent of data root)
+            candidates.append(root.parent / raw)
+        safe: Path | None = None
+        for cand in candidates:
+            # Allow files under data root OR project root/data
+            for base in (root, root.parent):
+                resolved = _safe_resolve(cand, base)
+                if resolved is not None and resolved.is_file():
+                    safe = resolved
+                    break
+            if safe is not None:
+                break
+            try:
+                if cand.is_file():
+                    safe = cand.resolve()
+                    break
+            except Exception:
+                pass
         if safe is None or not safe.is_file():
             return
         size = safe.stat().st_size

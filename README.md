@@ -137,3 +137,53 @@ Local equivalent of production start:
 python -m bot.web
 ```
 
+
+## Telegram private channel archive
+
+Durable storage for completed Parquet/JSON artifacts. SQLite stores only
+metadata and Telegram `file_id` references — never file bytes.
+
+### Owner setup
+
+1. Create a **private** Telegram channel.
+2. Add the bot as **administrator** with **Post messages**.
+3. Obtain the numeric channel id (typically `-100…`).
+4. Set Render environment variables (never commit secrets):
+
+```
+TELEGRAM_ARCHIVE_ENABLED=true
+TELEGRAM_ARCHIVE_CHANNEL_ID=-100xxxxxxxxxx
+ARCHIVE_MAX_RETRIES=8
+ARCHIVE_BACKOFF_BASE_SEC=30
+ARCHIVE_BACKOFF_CAP_SEC=3600
+ALLOW_DELETE_STAGING=false
+```
+
+Keep existing `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_IDS`.
+
+### Behaviour
+
+1. After a day download reaches SUCCESS, archive jobs are enqueued per artifact
+   (`ticks.parquet`, `bars_1s.parquet`, `metadata.json` — only files that exist).
+2. The worker uploads sequentially to the private channel.
+3. On success, SQLite stores `file_id`, `file_unique_id`, `message_id`, `chat_id`
+   and marks the artifact **INDEXED**.
+4. `/get` prefers INDEXED archive delivery by `file_id` (no disk required).
+5. If the day is SUCCESS but archive incomplete, archival continues — **no** re-download.
+6. Local disk is **staging**. Render Free disk is ephemeral; do not treat it as durable.
+7. `ALLOW_DELETE_STAGING=true` only deletes local files after INDEXED (default false).
+
+### Limits and recovery
+
+- Telegram Bot API document limit ~50MB (enforced with margin).
+- Uploads are **at-least-once**: a crash after Telegram accepts a file but before
+  SQLite INDEXED may create a duplicate channel message on retry.
+- Stale `UPLOADING` rows are recovered on worker start.
+- Diagnose with `/status` (archive counts) and SQLite tables `archive_jobs`,
+  `archived_artifacts`, `archive_upload_attempts`.
+
+### Reprocess an artifact
+
+Delete the corresponding `archived_artifacts` row (or set status back to PENDING
+with cleared telegram fields) and ensure the local staging file exists, then let
+the worker retry — or re-download the day if staging was lost.

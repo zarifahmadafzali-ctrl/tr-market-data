@@ -66,3 +66,43 @@ def public_access_enabled() -> bool:
 
 # Telegram Bot API document limit ~50MB; stay under with margin
 TELEGRAM_MAX_UPLOAD_BYTES = 45 * 1024 * 1024
+
+
+def archive_enabled() -> bool:
+    return _bool("TELEGRAM_ARCHIVE_ENABLED", False)
+
+
+def archive_channel_id() -> int | None:
+    raw = (os.getenv("TELEGRAM_ARCHIVE_CHANNEL_ID") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def archive_max_retries() -> int:
+    try:
+        return max(0, int(os.getenv("ARCHIVE_MAX_RETRIES") or "8"))
+    except ValueError:
+        return 8
+
+
+def archive_backoff_base_sec() -> int:
+    try:
+        return max(1, int(os.getenv("ARCHIVE_BACKOFF_BASE_SEC") or "30"))
+    except ValueError:
+        return 30
+
+
+def archive_backoff_cap_sec() -> int:
+    try:
+        return max(1, int(os.getenv("ARCHIVE_BACKOFF_CAP_SEC") or "3600"))
+    except ValueError:
+        return 3600
+
+
+def allow_delete_staging() -> bool:
+    return _bool("ALLOW_DELETE_STAGING", False)
+

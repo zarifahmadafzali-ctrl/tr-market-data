@@ -85,9 +85,31 @@ def run_day_pipeline(
     ]
 
     try:
+        def _persist_hour(hr: dict[str, Any]) -> None:
+            upsert_hour(
+                db,
+                {
+                    "symbol": sym,
+                    "provider": provider,
+                    "day": day.isoformat(),
+                    "hour": hr["hour"],
+                    "status": hr["classification"],
+                    "tick_count": len(hr.get("ticks") or []),
+                    "http_status": hr.get("status"),
+                    "attempts": hr.get("attempts"),
+                    "error": hr.get("error"),
+                },
+            )
+
         if need_hours:
             downloaded = asyncio.run(
-                download_day(symbol, day, hours=need_hours, seed_hour_results=seed)
+                download_day(
+                    symbol,
+                    day,
+                    hours=need_hours,
+                    seed_hour_results=seed,
+                    on_hour=_persist_hour,
+                )
             )
         else:
             # All hours already classified — still ensure parquet/bars exist
@@ -260,6 +282,24 @@ def run_day_pipeline(
             "error": error,
         },
     )
+
+
+    # Durable Telegram archive (optional; disabled unless TELEGRAM_ARCHIVE_ENABLED)
+    if final in ("SUCCESS", "EXPECTED_EMPTY"):
+        try:
+            from bot.archive import enqueue_archive_for_day
+            from bot.config import archive_enabled
+
+            if archive_enabled():
+                enqueue_archive_for_day(
+                    db_path if isinstance(db_path, Path) else Path(str(db_path)),
+                    sym,
+                    day.isoformat(),
+                    provider=provider,
+                    root=data_root,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("archive enqueue failed for %s %s: %s", sym, day, e)
 
     result.update(
         {

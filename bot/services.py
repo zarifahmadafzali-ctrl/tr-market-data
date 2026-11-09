@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from bot.archive import (
+    enqueue_archive_for_day,
+    get_indexed_artifacts,
+    package_fully_indexed,
+)
+from bot.config import archive_enabled
 from bot.delivery import catalog_files_for_day, day_ready
 from bot.parsers import GetRequest
-from db.catalog import connect, get_day, get_job, job_day_results, list_active_jobs
+from db.catalog import connect, get_job, job_day_results, list_active_jobs
 from downloader.symbols import normalize_symbol
 from scheduler.jobs import cancel_job, enqueue_range_job, run_job
-from storage.paths import day_dir
 
 
 def status_snapshot(db_path: Path) -> dict[str, Any]:
@@ -24,10 +28,25 @@ def status_snapshot(db_path: Path) -> dict[str, Any]:
         "SELECT COUNT(*) AS c FROM download_days WHERE status = 'SUCCESS'"
     )
     ok = int(cur.fetchone()["c"])
+    archive_stats = {"enabled": archive_enabled(), "indexed_artifacts": 0, "pending": 0}
+    try:
+        archive_stats["indexed_artifacts"] = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM archived_artifacts WHERE status = 'INDEXED'"
+            ).fetchone()["c"]
+        )
+        archive_stats["pending"] = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM archived_artifacts WHERE status IN ('PENDING','FAILED','UPLOADING')"
+            ).fetchone()["c"]
+        )
+    except Exception:
+        pass
     return {
         "catalog_days": days,
         "success_days": ok,
         "active_jobs": len(active),
+        "archive": archive_stats,
         "jobs": [
             {
                 "id": j["id"],
@@ -47,9 +66,11 @@ def handle_get_request(
     db_path: Path,
     data_root: Path,
     run_immediately: bool = False,
+    requester_chat_id: int | None = None,
+    requester_user_id: int | None = None,
 ) -> dict[str, Any]:
-    """Check catalog; deliver if ready; else enqueue Phase 2A job."""
-    days = []
+    """Check archive → local disk → enqueue download. No second downloader."""
+    days: list[date] = []
     d = req.start
     while d <= req.end:
         days.append(d)
@@ -57,24 +78,57 @@ def handle_get_request(
 
     ready_days: list[str] = []
     missing_days: list[str] = []
+    archive_files: list[dict[str, Any]] = []
+    local_files: list[dict[str, Any]] = []
+    archive_partial_days: list[str] = []
+
     for day in days:
         iso = day.isoformat()
+        if archive_enabled() and package_fully_indexed(db_path, req.symbol, iso, req.kind):
+            ready_days.append(iso)
+            for row in get_indexed_artifacts(db_path, req.symbol, iso, req.kind):
+                archive_files.append(
+                    {
+                        "source": "telegram_archive",
+                        "file_id": row["telegram_file_id"],
+                        "file_unique_id": row.get("telegram_file_unique_id"),
+                        "label": f"{row['symbol']} {row['day']} {row['file_name']} (archive)",
+                        "file_name": row["file_name"],
+                        "size": row.get("size_bytes") or 0,
+                        "artifact_type": row["artifact_type"],
+                        "within_telegram_limit": True,
+                    }
+                )
+            continue
+
         if day_ready(db_path, req.symbol, iso, req.kind):
             ready_days.append(iso)
+            if archive_enabled():
+                try:
+                    enqueue_archive_for_day(
+                        db_path,
+                        req.symbol,
+                        iso,
+                        root=data_root,
+                        requester_chat_id=requester_chat_id,
+                        requester_user_id=requester_user_id,
+                    )
+                    if not package_fully_indexed(db_path, req.symbol, iso, req.kind):
+                        archive_partial_days.append(iso)
+                except Exception:
+                    archive_partial_days.append(iso)
+            for offer in catalog_files_for_day(db_path, req.symbol, iso, req.kind):
+                local_files.append(
+                    {
+                        "source": "local_disk",
+                        "path": str(offer.path),
+                        "label": offer.label,
+                        "size": offer.size,
+                        "within_telegram_limit": offer.within_telegram_limit,
+                    }
+                )
         else:
             missing_days.append(iso)
-
-    files: list[dict[str, Any]] = []
-    for iso in ready_days:
-        for offer in catalog_files_for_day(db_path, req.symbol, iso, req.kind):
-            files.append(
-                {
-                    "path": str(offer.path),
-                    "label": offer.label,
-                    "size": offer.size,
-                    "within_telegram_limit": offer.within_telegram_limit,
-                }
-            )
 
     job_id = None
     job_result = None
@@ -84,25 +138,36 @@ def handle_get_request(
             symbols=[req.symbol],
             start_day=req.start,
             end_day=req.end,
-            provider="dukascopy",
         )
         if run_immediately:
             job_result = run_job(db_path, job_id, data_root=data_root)
+            if archive_enabled():
+                for iso in list(missing_days):
+                    if day_ready(db_path, req.symbol, iso, req.kind):
+                        enqueue_archive_for_day(
+                            db_path,
+                            req.symbol,
+                            iso,
+                            root=data_root,
+                            requester_chat_id=requester_chat_id,
+                            requester_user_id=requester_user_id,
+                        )
 
+    files = archive_files + local_files
     return {
         "symbol": normalize_symbol(req.symbol),
         "kind": req.kind,
         "ready_days": ready_days,
         "missing_days": missing_days,
+        "archive_partial_days": archive_partial_days,
         "files": files,
+        "archive_files": archive_files,
+        "local_files": local_files,
         "job_id": job_id,
         "job_result": job_result,
     }
 
 
-def list_jobs(db_path: Path) -> list[dict[str, Any]]:
-    conn = connect(db_path)
-    return list_active_jobs(conn) + _recent_jobs(conn, limit=15)
 
 
 def _recent_jobs(conn, limit: int = 15) -> list[dict[str, Any]]:
@@ -115,6 +180,11 @@ def _recent_jobs(conn, limit: int = 15) -> list[dict[str, Any]]:
         (limit,),
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def list_jobs(db_path: Path) -> list[dict[str, Any]]:
+    conn = connect(db_path)
+    return [dict(j) for j in list_active_jobs(conn)] + _recent_jobs(conn, limit=15)
 
 
 def cancel_user_job(db_path: Path, job_id: int) -> dict[str, Any]:

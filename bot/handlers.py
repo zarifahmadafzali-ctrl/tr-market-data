@@ -128,6 +128,8 @@ async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db_path=sqlite_path(),
         data_root=data_root(),
         run_immediately=False,
+        requester_chat_id=(update.effective_chat.id if update.effective_chat else None),
+        requester_user_id=(update.effective_user.id if update.effective_user else None),
     )
     await _reply_get_result(update, result)
 
@@ -144,21 +146,46 @@ async def _reply_get_result(update: Update, result: dict) -> None:
     msg = update.effective_message
     await msg.reply_text("\n".join(lines))
 
-    # Deliver ready files
-    for f in result.get("files") or []:
-        path = Path(f["path"])
-        if not f.get("within_telegram_limit"):
-            await msg.reply_text(
-                f"{f['label']}: file is {f['size']} bytes — exceeds Telegram upload limit. "
-                "Use server-side access or a future download link."
-            )
-            continue
+    # Deliver ready files (archive file_id first, then local disk)
+    files = result.get("files") or []
+    log.info("delivering %s file(s) for %s", len(files), result.get("symbol"))
+    if result.get("archive_partial_days"):
+        await msg.reply_text(
+            "Archive incomplete for: "
+            + ", ".join(result["archive_partial_days"])
+            + " — local/archive upload continues in background."
+        )
+    if not files and result.get("ready_days"):
+        await msg.reply_text(
+            "Data is ready in catalog but no files could be resolved for upload. "
+            "Please notify admin (path bug)."
+        )
+    for f in files:
         try:
+            if f.get("source") == "telegram_archive" and f.get("file_id"):
+                await msg.reply_document(
+                    document=f["file_id"],
+                    filename=f.get("file_name") or "data.bin",
+                    caption=f.get("label") or "",
+                )
+                continue
+            path = Path(f["path"])
+            if not f.get("within_telegram_limit"):
+                await msg.reply_text(
+                    f"{f['label']}: file is {f['size']} bytes — exceeds Telegram upload limit. "
+                    "Use server-side access or a future download link."
+                )
+                continue
+            if not path.is_file():
+                await msg.reply_text(f"Missing local file for {f.get('label')}")
+                continue
             with path.open("rb") as fh:
                 await msg.reply_document(document=fh, filename=path.name, caption=f["label"])
         except Exception as e:  # noqa: BLE001
             log.exception("send failed")
-            await msg.reply_text(f"Failed to send {f['label']}: {e}")
+            await msg.reply_text(f"Failed to send {f.get('label')}: {e}")
+
+
 
 
 async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -283,7 +310,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await q.edit_message_text(str(e))
             return
         result = handle_get_request(
-            req, db_path=sqlite_path(), data_root=data_root(), run_immediately=False
+            req,
+            db_path=sqlite_path(),
+            data_root=data_root(),
+            run_immediately=False,
+            requester_chat_id=(q.message.chat_id if q.message else None),
+            requester_user_id=(q.from_user.id if q.from_user else None),
         )
         lines = [
             f"Symbol: {result['symbol']}",
@@ -293,12 +325,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ]
         if result.get("job_id"):
             lines.append(f"Queued job #{result['job_id']}")
+        if result.get("archive_partial_days"):
+            lines.append("Archive pending: " + ", ".join(result["archive_partial_days"]))
         await q.edit_message_text("\n".join(lines))
-        # Send files if ready
         for f in result.get("files") or []:
-            path = Path(f["path"])
-            if f.get("within_telegram_limit") and path.is_file():
-                try:
+            try:
+                if f.get("source") == "telegram_archive" and f.get("file_id"):
+                    await context.bot.send_document(
+                        chat_id=q.message.chat_id,
+                        document=f["file_id"],
+                        filename=f.get("file_name") or "data.bin",
+                        caption=f.get("label") or "",
+                    )
+                    continue
+                path = Path(f["path"])
+                if f.get("within_telegram_limit") and path.is_file():
                     with path.open("rb") as fh:
                         await context.bot.send_document(
                             chat_id=q.message.chat_id,
@@ -306,7 +347,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                             filename=path.name,
                             caption=f["label"],
                         )
-                except Exception as e:  # noqa: BLE001
-                    await context.bot.send_message(
-                        chat_id=q.message.chat_id, text=f"Send failed: {e}"
-                    )
+            except Exception as e:  # noqa: BLE001
+                await context.bot.send_message(
+                    chat_id=q.message.chat_id, text=f"Send failed: {e}"
+                )
