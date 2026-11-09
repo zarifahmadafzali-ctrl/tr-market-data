@@ -69,10 +69,12 @@ def handle_get_request(
         for offer in catalog_files_for_day(db_path, req.symbol, iso, req.kind):
             files.append(
                 {
-                    "path": str(offer.path),
+                    "path": str(offer.path) if offer.path else None,
+                    "file_id": offer.file_id,
                     "label": offer.label,
                     "size": offer.size,
                     "within_telegram_limit": offer.within_telegram_limit,
+                    "source": offer.source,
                 }
             )
 
