@@ -12,8 +12,8 @@ If Trading Replay is offline or being updated, this service can keep downloading
 | `bot/` | Telegram bot and user commands |
 | `downloader/` | Dukascopy historical tick download |
 | `processor/` | Tick → 1s / 1m / higher TF bars |
-| `db/` | SQLite catalog (symbols, days, status) |
-| `storage/` | Local + future cloud object storage |
+| `db/` | SQLite catalog (symbols, days, status, Telegram file_ids) |
+| `storage/` | Local + Telegram channel archive |
 | `scheduler/` | Timed download jobs |
 | `data/` | Local file workspace (gitignored payloads) |
 
@@ -24,11 +24,12 @@ If Trading Replay is offline or being updated, this service can keep downloading
 - Dukascopy historical ticks
 - Parquet (compressed) for bulk files
 - SQLite for catalog (Postgres later if needed)
+- Private Telegram channel as durable file storage
 
 ## Principle
 
 **Bot server ≠ durable file storage.**  
-Downloaded datasets must survive bot restarts. Start with local `data/` + SQLite; later attach independent object storage without rewriting the domain model.
+Downloaded datasets must survive bot restarts. Local `data/` is a cache. After every successful day the bot uploads the Parquet files to a private Telegram channel and stores the `file_id` in SQLite. On `/get` the bot prefers the archived `file_id` so delivery works even when the Render disk is empty.
 
 ## Quick start (local)
 
@@ -37,28 +38,34 @@ python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env
+# edit .env — set TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, TELEGRAM_STORAGE_CHANNEL_ID
 
-# Pilot: download one US30 day of ticks (see scripts/)
+# Pilot: download one US30 day of ticks
 python -m scripts.pilot_us30_day --date 2024-06-12
 ```
 
-## Status
+## Environment
 
-Scaffold only. Pilot downloader for US30 is the next executable step.
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ADMIN_IDS=1675868882
+TELEGRAM_STORAGE_CHANNEL_ID=-100xxxxxxxxxx   # private channel, bot is admin
+SQLITE_PATH=db/tr_market_data.sqlite
+DATA_ROOT=data
+BOT_PUBLIC_ACCESS=false
+```
 
-## License
+## Telegram channel storage
 
-Private project — all rights reserved.
-
-
-## Phase 1 status
-
-- Dukascopy historical tick download (ported logic)
-- Raw ticks + true 1s mid OHLC Parquet
-- SQLite catalog with hour classifications
-- Pilot: `python -m scripts.pilot_us30_day --date YYYY-MM-DD`
-
+1. Create a private channel (or use an existing one).
+2. Add the bot as administrator with **Post Messages**.
+3. Get the channel ID (forward a message to @userinfobot → looks like `-100…`).
+4. Set `TELEGRAM_STORAGE_CHANNEL_ID` in the environment.
+5. After each successful download the bot posts:
+   - `SYMBOL | YYYY-MM-DD | tick`
+   - `SYMBOL | YYYY-MM-DD | 1s`
+   - `SYMBOL | YYYY-MM-DD | meta`
+6. `/get` then re-sends those files by `file_id` (no local disk required).
 
 ## Phase 2A — multi-day jobs
 
@@ -71,39 +78,24 @@ python -m scripts.run_range_job --symbol US30 --start 2024-06-10 --end 2024-06-1
 - Job states: QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, CANCELLED
 - Restart recovery: RUNNING → QUEUED
 
-
 ## Phase 2B — Telegram bot (admin-only)
 
-Environment (`.env`, never commit):
-
-```
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ADMIN_IDS=1675868882
-SQLITE_PATH=db/tr_market_data.sqlite
-DATA_ROOT=data
-BOT_PUBLIC_ACCESS=false
-```
-
-Start bot (receives Telegram updates):
+Start (local):
 
 ```bash
-python -m bot.app
+python -m bot.app          # bot only
+python -m bot.worker       # worker only
 ```
 
-Start worker (processes QUEUED download jobs):
+Or combined (Render):
 
 ```bash
-python -m bot.worker
+python -m bot.web
 ```
 
 Commands: `/start` `/status` `/symbols` `/get` `/jobs` `/cancel` `/help`
 
-## Render (Free Web Service) — single process
-
-Render **Web Service** requires an open HTTP port. Running only `python -m bot.app`
-will poll Telegram but eventually fail with *No open ports detected* / *Timed Out*.
-
-Use the combined entrypoint (health + Telegram bot + download worker):
+## Render (Free Web Service)
 
 **Build Command**
 ```
@@ -115,25 +107,13 @@ pip install -r requirements.txt
 python -m bot.web
 ```
 
-**Environment**
-```
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ADMIN_IDS=1675868882
-SQLITE_PATH=db/tr_market_data.sqlite
-DATA_ROOT=data
-BOT_PUBLIC_ACCESS=false
-```
+Health check: `https://<your-service>.onrender.com/health`
 
-Health check URL: `https://<your-service>.onrender.com/health`
-
-Notes (Render Free):
-- Service may **sleep** after inactivity; first Telegram reply can be slow after wake.
-- Disk is **ephemeral** — Parquet/SQLite can be lost on redeploy or restart. Plan durable storage later.
+Notes:
+- Disk is ephemeral — that is why channel archive exists.
+- Prefer a longer uptime check interval (5–10 min) to avoid extra load.
 - Run **one** instance only (Telegram allows a single `getUpdates` consumer).
-- Prefer a **separate** Render account/workspace from Trading Replay so free hours are not shared.
 
-Local equivalent of production start:
-```
-python -m bot.web
-```
+## License
 
+Private project — all rights reserved.
