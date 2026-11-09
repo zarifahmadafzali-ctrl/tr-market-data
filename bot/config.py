@@ -125,3 +125,24 @@ def archive_backoff_cap_sec() -> int:
 def allow_delete_staging() -> bool:
     return _bool("ALLOW_DELETE_STAGING", False)
 
+
+
+def manifest_enabled() -> bool:
+    return _bool("ARCHIVE_MANIFEST_ENABLED", False)
+
+
+def manifest_repo() -> str:
+    return (os.getenv("ARCHIVE_MANIFEST_REPO") or "").strip()
+
+
+def manifest_branch() -> str:
+    return (os.getenv("ARCHIVE_MANIFEST_BRANCH") or "main").strip() or "main"
+
+
+def manifest_path() -> str:
+    return (os.getenv("ARCHIVE_MANIFEST_PATH") or "archive_manifest.json").strip() or "archive_manifest.json"
+
+
+def manifest_token() -> str:
+    """GitHub PAT for private manifest repo. Never log this value."""
+    return (os.getenv("ARCHIVE_MANIFEST_TOKEN") or "").strip()

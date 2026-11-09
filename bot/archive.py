@@ -406,13 +406,13 @@ def claim_next_artifact(conn: sqlite3.Connection) -> sqlite3.Row | None:
     row = conn.execute(
         """
         SELECT * FROM archived_artifacts
-        WHERE status IN (?, ?)
+        WHERE status IN (?, ?, ?)
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           AND retry_count <= max_retries
         ORDER BY id ASC
         LIMIT 1
         """,
-        (STATUS_PENDING, STATUS_FAILED, now),
+        (STATUS_PENDING, STATUS_FAILED, STATUS_UPLOADED, now),
     ).fetchone()
     if not row:
         return None
@@ -422,9 +422,9 @@ def claim_next_artifact(conn: sqlite3.Connection) -> sqlite3.Row | None:
     cur = conn.execute(
         """
         UPDATE archived_artifacts SET status = ?, updated_at = ?
-        WHERE id = ? AND status IN (?, ?)
+        WHERE id = ? AND status IN (?, ?, ?)
         """,
-        (STATUS_UPLOADING, now, int(row["id"]), STATUS_PENDING, STATUS_FAILED),
+        (STATUS_UPLOADING, now, int(row["id"]), STATUS_PENDING, STATUS_FAILED, STATUS_UPLOADED),
     )
     if cur.rowcount != 1:
         return None
@@ -459,6 +459,111 @@ def default_telegram_upload(
         "message_id": result.get("message_id"),
         "chat_id": result.get("chat", {}).get("id", chat_id),
     }
+
+
+
+def _finalize_with_manifest(
+    conn: sqlite3.Connection,
+    *,
+    aid: int,
+    job_id: int,
+    row: sqlite3.Row,
+    file_id: str,
+    file_unique_id: str | None,
+    message_id: int | None,
+    chat_id: int | None,
+    local: Path | None,
+) -> dict[str, Any]:
+    """Push GitHub manifest then mark INDEXED. On failure leave UPLOADED for retry."""
+    from bot.config import manifest_enabled
+    from bot.manifest import upsert_artifact_remote
+
+    file_name = row["file_name"] or ARTIFACT_FILE_NAMES.get(row["artifact_type"], "artifact.bin")
+    artifact_payload = {
+        "file_id": file_id,
+        "file_unique_id": file_unique_id,
+        "message_id": message_id,
+        "chat_id": str(chat_id) if chat_id is not None else None,
+        "sha256": row["sha256"],
+        "size_bytes": row["size_bytes"],
+        "status": STATUS_INDEXED,
+        "artifact_type": row["artifact_type"],
+    }
+    try:
+        if manifest_enabled():
+            ok = upsert_artifact_remote(
+                package_key=package_key(row["provider"], row["symbol"], row["day"]),
+                provider=row["provider"],
+                symbol=row["symbol"],
+                day=row["day"],
+                file_name=file_name,
+                artifact=artifact_payload,
+            )
+            if not ok:
+                now = utc_now()
+                new_retry = int(row["retry_count"] or 0) + 1
+                conn.execute(
+                    """
+                    UPDATE archived_artifacts SET
+                      status = ?, retry_count = ?, next_attempt_at = ?,
+                      last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        STATUS_UPLOADED,
+                        new_retry,
+                        next_attempt_iso(new_retry),
+                        "GitHub manifest update failed — will retry without re-upload",
+                        now,
+                        aid,
+                    ),
+                )
+                recompute_package_status(conn, job_id)
+                conn.commit()
+                return {
+                    "artifact_id": aid,
+                    "status": STATUS_UPLOADED,
+                    "file_id": file_id,
+                    "error": "manifest_update_failed",
+                }
+        _mark_indexed(
+            conn,
+            aid,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            message_id=message_id,
+            chat_id=chat_id,
+        )
+        recompute_package_status(conn, job_id)
+        conn.commit()
+        if allow_delete_staging() and local is not None:
+            _maybe_delete_staging(local)
+        return {
+            "artifact_id": aid,
+            "status": STATUS_INDEXED,
+            "file_id": file_id,
+            "message_id": message_id,
+        }
+    except Exception as e:  # noqa: BLE001
+        log.exception("manifest finalize failed artifact=%s", aid)
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE archived_artifacts SET
+              status = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                STATUS_UPLOADED,
+                f"manifest finalize error: {e}",
+                next_attempt_iso(int(row["retry_count"] or 0) + 1),
+                now,
+                aid,
+            ),
+        )
+        recompute_package_status(conn, job_id)
+        conn.commit()
+        return {"artifact_id": aid, "status": STATUS_UPLOADED, "error": str(e)}
 
 
 def process_one_artifact(
@@ -504,6 +609,20 @@ def process_one_artifact(
     )
     attempt_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     conn.commit()
+
+    # Manifest-only retry: Telegram already succeeded (file_id present)
+    if row["telegram_file_id"]:
+        return _finalize_with_manifest(
+            conn,
+            aid=aid,
+            job_id=job_id,
+            row=row,
+            file_id=row["telegram_file_id"],
+            file_unique_id=row["telegram_file_unique_id"],
+            message_id=row["telegram_message_id"],
+            chat_id=row["telegram_chat_id"] or ch,
+            local=local,
+        )
 
     size = int(row["size_bytes"] or 0)
     if size > TELEGRAM_MAX_UPLOAD_BYTES:
@@ -561,40 +680,43 @@ def process_one_artifact(
             """,
             (file_id, meta.get("message_id"), utc_now(), attempt_id),
         )
-        conn.commit()
-        # Separate step: index — if this fails, recovery can use RESPONSE_OK
-        try:
-            _mark_indexed(
-                conn,
+        # Persist Telegram refs as UPLOADED — INDEXED only after GitHub manifest OK
+        now2 = utc_now()
+        conn.execute(
+            """
+            UPDATE archived_artifacts SET
+              status = ?,
+              telegram_file_id = ?,
+              telegram_file_unique_id = COALESCE(?, telegram_file_unique_id),
+              telegram_message_id = ?,
+              telegram_chat_id = ?,
+              uploaded_at = COALESCE(uploaded_at, ?),
+              updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                STATUS_UPLOADED,
+                file_id,
+                meta.get("file_unique_id"),
+                meta.get("message_id"),
+                meta.get("chat_id", ch),
+                now2,
+                now2,
                 aid,
-                file_id=file_id,
-                file_unique_id=meta.get("file_unique_id"),
-                message_id=meta.get("message_id"),
-                chat_id=meta.get("chat_id", ch),
-            )
-            recompute_package_status(conn, job_id)
-            conn.commit()
-            if allow_delete_staging():
-                _maybe_delete_staging(local)
-            return {
-                "artifact_id": aid,
-                "status": STATUS_INDEXED,
-                "file_id": file_id,
-                "message_id": meta.get("message_id"),
-            }
-        except Exception as e:  # noqa: BLE001
-            log.exception("index after upload failed artifact=%s", aid)
-            # Leave UPLOADING or reset with attempt evidence
-            conn.execute(
-                """
-                UPDATE archived_artifacts SET
-                  status=?, last_error=?, updated_at=?
-                WHERE id=?
-                """,
-                (STATUS_UPLOADING, f"index failed after upload: {e}", utc_now(), aid),
-            )
-            conn.commit()
-            return {"artifact_id": aid, "status": STATUS_UPLOADING, "error": str(e)}
+            ),
+        )
+        conn.commit()
+        return _finalize_with_manifest(
+            conn,
+            aid=aid,
+            job_id=job_id,
+            row=row,
+            file_id=file_id,
+            file_unique_id=meta.get("file_unique_id"),
+            message_id=meta.get("message_id"),
+            chat_id=meta.get("chat_id", ch),
+            local=local,
+        )
     except Exception as e:  # noqa: BLE001
         _fail_attempt(conn, attempt_id, aid, job_id, str(e), int(row["retry_count"]))
         return {"artifact_id": aid, "status": STATUS_FAILED, "error": str(e)}

@@ -20,6 +20,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from bot.archive import archive_tick, recover_stale_uploading, reconcile_success_days
+from bot.manifest import startup_sync_manifest
 from bot.config import archive_enabled, data_root, sqlite_path, telegram_token, archive_channel_id
 from scheduler.jobs import recover_stale_running_jobs
 from scheduler.runner import DownloadScheduler
@@ -86,6 +87,11 @@ def _run_worker() -> None:
             reconcile_success_days(db)
         except Exception as e:
             log.exception("archive recovery failed: %s", e)
+    try:
+        sync = startup_sync_manifest(db)
+        log.info("GitHub manifest sync status=%s stats=%s", sync.get("status"), sync.get("stats"))
+    except Exception as e:
+        log.exception("manifest startup sync error (continuing): %s", e)
     else:
         log.info("Telegram archive disabled (TELEGRAM_ARCHIVE_ENABLED not true)")
     sched = DownloadScheduler(db, data)

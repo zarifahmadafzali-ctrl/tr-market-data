@@ -166,3 +166,45 @@ Keep existing `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_IDS`.
 Delete the corresponding `archived_artifacts` row (or set status back to PENDING
 with cleared telegram fields) and ensure the local staging file exists, then let
 the worker retry — or re-download the day if staging was lost.
+
+## GitHub archive manifest (durable index)
+
+Telegram stores the files (`file_id`). A **private** GitHub repository stores a
+JSON index so Render can wipe local SQLite and still avoid re-downloading.
+
+### Setup
+
+1. Create a **private** empty GitHub repository (example: `your-user/tr-market-archive-index`).
+2. Create a fine-grained PAT with **Contents: Read and write** on that repo only.
+3. On Render set:
+
+```
+ARCHIVE_MANIFEST_ENABLED=true
+ARCHIVE_MANIFEST_REPO=OWNER/PRIVATE_REPO
+ARCHIVE_MANIFEST_BRANCH=main
+ARCHIVE_MANIFEST_PATH=archive_manifest.json
+ARCHIVE_MANIFEST_TOKEN=github_pat_...
+```
+
+Never commit the token. Minimum scopes only.
+
+### Behaviour
+
+1. After Telegram upload succeeds, the bot merges the artifact into the manifest
+   via the GitHub Contents API (handles HTTP 409 by refetch + merge).
+2. SQLite marks the artifact **INDEXED** only after the manifest write succeeds.
+3. If the manifest write fails, SQLite keeps status **UPLOADED** with `file_id`
+   and retries without re-uploading to Telegram.
+4. On process start, the worker fetches the manifest and rebuilds SQLite archive
+   rows (idempotent; does not clobber local in-flight uploads).
+5. `/get` hydrates from the manifest when local SQLite has no INDEXED row, then
+   delivers by `file_id`. Downloads run only when the artifact is absent from
+   both indexes.
+
+Existing archived Telegram files are **not** backfilled automatically; new
+archives after enablement are indexed going forward.
+
+### When GitHub is down
+
+The bot keeps running on local SQLite. Manifest sync is retried later. Temporary
+GitHub outages do not by themselves trigger Dukascopy re-downloads.

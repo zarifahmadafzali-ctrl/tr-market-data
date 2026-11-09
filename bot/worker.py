@@ -9,6 +9,7 @@ import logging
 import time
 
 from bot.archive import archive_tick, recover_stale_uploading, reconcile_success_days
+from bot.manifest import startup_sync_manifest
 from bot.config import archive_enabled, data_root, sqlite_path
 from scheduler.jobs import recover_stale_running_jobs
 from scheduler.runner import DownloadScheduler
@@ -28,6 +29,11 @@ def main() -> None:
             reconcile_success_days(db)
         except Exception as e:
             log.warning("archive reconcile: %s", e)
+    try:
+        sync = startup_sync_manifest(db)
+        log.info("GitHub manifest sync status=%s", sync.get("status"))
+    except Exception as e:
+        log.warning("manifest startup sync: %s", e)
     sched = DownloadScheduler(db, data)
     log.info("Worker started db=%s data=%s archive=%s", db, data, archive_enabled())
     while True:

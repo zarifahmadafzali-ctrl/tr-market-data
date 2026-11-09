@@ -84,6 +84,12 @@ def handle_get_request(
 
     for day in days:
         iso = day.isoformat()
+        # Optional durable index: hydrate SQLite from GitHub manifest when local miss
+        if archive_enabled() and not package_fully_indexed(db_path, req.symbol, iso, req.kind):
+            try:
+                _hydrate_from_manifest(db_path, req.symbol, iso)
+            except Exception:
+                pass
         if archive_enabled() and package_fully_indexed(db_path, req.symbol, iso, req.kind):
             ready_days.append(iso)
             for row in get_indexed_artifacts(db_path, req.symbol, iso, req.kind):
