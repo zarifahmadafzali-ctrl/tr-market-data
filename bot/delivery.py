@@ -1,4 +1,4 @@
-"""Safe file delivery restricted to catalog-registered paths."""
+"""Safe file delivery — prefer Telegram file_id (channel archive), fall back to local path."""
 
 from __future__ import annotations
 
@@ -13,10 +13,12 @@ from downloader.symbols import normalize_symbol
 
 @dataclass
 class FileOffer:
-    path: Path
+    path: Path | None
+    file_id: str | None
     label: str
     size: int
     within_telegram_limit: bool
+    source: str  # "channel" | "local"
 
 
 def _safe_resolve(path: Path, root: Path) -> Path | None:
@@ -26,10 +28,8 @@ def _safe_resolve(path: Path, root: Path) -> Path | None:
         resolved.relative_to(root_r)
         return resolved
     except Exception:
-        # Allow absolute paths that exist if they match catalog entries under data root
         try:
             if path.is_file():
-                # still require path string to live under root when possible
                 return path.resolve()
         except Exception:
             return None
@@ -53,7 +53,25 @@ def catalog_files_for_day(
     root = data_root()
     offers: list[FileOffer] = []
 
-    def add(path_str: str | None, label: str) -> None:
+    def add(
+        path_str: str | None,
+        file_id: str | None,
+        label: str,
+    ) -> None:
+        # Prefer channel file_id — works even when local disk is gone
+        if file_id:
+            offers.append(
+                FileOffer(
+                    path=None,
+                    file_id=file_id,
+                    label=label,
+                    size=0,
+                    within_telegram_limit=True,
+                    source="channel",
+                )
+            )
+            return
+
         if not path_str:
             return
         p = Path(path_str)
@@ -66,17 +84,19 @@ def catalog_files_for_day(
         offers.append(
             FileOffer(
                 path=safe,
+                file_id=None,
                 label=label,
                 size=size,
                 within_telegram_limit=size <= TELEGRAM_MAX_UPLOAD_BYTES and size > 0,
+                source="local",
             )
         )
 
     if kind in ("tick", "both"):
-        add(row.get("tick_file_path"), f"{sym} {day} ticks.parquet")
+        add(row.get("tick_file_path"), row.get("tick_file_id"), f"{sym} {day} ticks.parquet")
     if kind in ("1s", "both"):
-        add(row.get("bars_1s_file_path"), f"{sym} {day} bars_1s.parquet")
-    add(row.get("metadata_path"), f"{sym} {day} metadata.json")
+        add(row.get("bars_1s_file_path"), row.get("bars_1s_file_id"), f"{sym} {day} bars_1s.parquet")
+    add(row.get("metadata_path"), row.get("metadata_file_id"), f"{sym} {day} metadata.json")
     return offers
 
 
@@ -88,10 +108,20 @@ def day_ready(db_path: Path, symbol: str, day: str, kind: str, provider: str = "
         return False
     if row["status"] not in ("SUCCESS", "EXPECTED_EMPTY"):
         return False
-    if kind == "tick":
+
+    # Ready if we have either a file_id or a local file status
+    def has_tick() -> bool:
+        if row.get("tick_file_id"):
+            return True
         return row.get("tick_status") in ("SUCCESS", "EXPECTED_EMPTY")
-    if kind == "1s":
+
+    def has_bars() -> bool:
+        if row.get("bars_1s_file_id"):
+            return True
         return row.get("bars_1s_status") in ("SUCCESS", "EXPECTED_EMPTY")
-    return row.get("tick_status") in ("SUCCESS", "EXPECTED_EMPTY") and row.get(
-        "bars_1s_status"
-    ) in ("SUCCESS", "EXPECTED_EMPTY")
+
+    if kind == "tick":
+        return has_tick()
+    if kind == "1s":
+        return has_bars()
+    return has_tick() and has_bars()
