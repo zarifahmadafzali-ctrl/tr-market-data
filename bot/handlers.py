@@ -44,6 +44,51 @@ async def _gate(update: Update) -> bool:
     return True
 
 
+async def _send_offers(msg, context, files: list[dict]) -> None:
+    """Send files preferring channel file_id, falling back to local path."""
+    for f in files or []:
+        label = f.get("label") or "file"
+        file_id = f.get("file_id")
+        path_str = f.get("path")
+        source = f.get("source") or "local"
+
+        if file_id:
+            try:
+                await context.bot.send_document(
+                    chat_id=msg.chat_id,
+                    document=file_id,
+                    caption=f"{label} (from archive)",
+                )
+                continue
+            except Exception as e:  # noqa: BLE001
+                log.exception("send by file_id failed")
+                await msg.reply_text(f"Archive send failed for {label}: {e}")
+                # fall through to local if available
+
+        if not f.get("within_telegram_limit", True):
+            await msg.reply_text(
+                f"{label}: file is {f.get('size')} bytes — exceeds Telegram upload limit. "
+                "Use server-side access or a future download link."
+            )
+            continue
+
+        if path_str:
+            path = Path(path_str)
+            if path.is_file():
+                try:
+                    with path.open("rb") as fh:
+                        await msg.reply_document(
+                            document=fh, filename=path.name, caption=f"{label} (local)"
+                        )
+                except Exception as e:  # noqa: BLE001
+                    log.exception("send failed")
+                    await msg.reply_text(f"Failed to send {label}: {e}")
+            else:
+                await msg.reply_text(f"{label}: local file missing and no archive file_id.")
+        elif not file_id:
+            await msg.reply_text(f"{label}: no file available.")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _gate(update):
         return
@@ -64,6 +109,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "TR Market Data Bot\n\n"
         "Historical Dukascopy Tick + 1s OHLC archive.\n"
         "Admin-only access is enabled.\n\n"
+        "Finished files are archived to a private Telegram channel "
+        "so they survive server restarts.\n\n"
         "Use the menu or /help."
     )
     await update.message.reply_text(text, reply_markup=kb)
@@ -122,17 +169,16 @@ async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Checking catalog for {req.symbol} {req.start}→{req.end} ({req.kind})…"
     )
-    # Long downloads must not block forever in the handler; enqueue only.
     result = handle_get_request(
         req,
         db_path=sqlite_path(),
         data_root=data_root(),
         run_immediately=False,
     )
-    await _reply_get_result(update, result)
+    await _reply_get_result(update, context, result)
 
 
-async def _reply_get_result(update: Update, result: dict) -> None:
+async def _reply_get_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
     lines = [
         f"Symbol: {result['symbol']}",
         f"Kind: {result['kind']}",
@@ -143,22 +189,7 @@ async def _reply_get_result(update: Update, result: dict) -> None:
         lines.append(f"Queued job #{result['job_id']} (run worker to process).")
     msg = update.effective_message
     await msg.reply_text("\n".join(lines))
-
-    # Deliver ready files
-    for f in result.get("files") or []:
-        path = Path(f["path"])
-        if not f.get("within_telegram_limit"):
-            await msg.reply_text(
-                f"{f['label']}: file is {f['size']} bytes — exceeds Telegram upload limit. "
-                "Use server-side access or a future download link."
-            )
-            continue
-        try:
-            with path.open("rb") as fh:
-                await msg.reply_document(document=fh, filename=path.name, caption=f["label"])
-        except Exception as e:  # noqa: BLE001
-            log.exception("send failed")
-            await msg.reply_text(f"Failed to send {f['label']}: {e}")
+    await _send_offers(msg, context, result.get("files") or [])
 
 
 async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,7 +256,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_text(text)
         return
     if data == "menu:get":
-        # Symbol picker
         buttons = [
             [InlineKeyboardButton("US30", callback_data="get:sym:US30")],
             [InlineKeyboardButton("EURUSD", callback_data="get:sym:EURUSD")],
@@ -237,7 +267,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         sym = data.split(":", 2)[2]
         context.user_data["get_symbol"] = sym
         today = date.today()
-        # Offer a few recent weekdays as shortcuts + manual instruction
         buttons = []
         for i in range(0, 7):
             d = today - timedelta(days=i + 1)
@@ -295,18 +324,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             lines.append(f"Queued job #{result['job_id']}")
         await q.edit_message_text("\n".join(lines))
         # Send files if ready
-        for f in result.get("files") or []:
-            path = Path(f["path"])
-            if f.get("within_telegram_limit") and path.is_file():
-                try:
-                    with path.open("rb") as fh:
-                        await context.bot.send_document(
-                            chat_id=q.message.chat_id,
-                            document=fh,
-                            filename=path.name,
-                            caption=f["label"],
-                        )
-                except Exception as e:  # noqa: BLE001
-                    await context.bot.send_message(
-                        chat_id=q.message.chat_id, text=f"Send failed: {e}"
-                    )
+        class _FakeMsg:
+            def __init__(self, chat_id):
+                self.chat_id = chat_id
+
+            async def reply_text(self, text):
+                await context.bot.send_message(chat_id=self.chat_id, text=text)
+
+            async def reply_document(self, **kwargs):
+                await context.bot.send_document(chat_id=self.chat_id, **kwargs)
+
+        fake = _FakeMsg(q.message.chat_id)
+        await _send_offers(fake, context, result.get("files") or [])
