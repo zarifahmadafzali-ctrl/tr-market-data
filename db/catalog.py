@@ -12,6 +12,13 @@ SCHEMA = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
 
 JOB_STATES = ("QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED")
 
+_FILE_ID_COLUMNS = (
+    "tick_file_id",
+    "bars_1s_file_id",
+    "metadata_file_id",
+    "storage_message_ids",
+)
+
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
@@ -20,7 +27,18 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate_file_id_columns(conn)
     return conn
+
+
+def _migrate_file_id_columns(conn: sqlite3.Connection) -> None:
+    """Add Telegram file_id columns on existing databases."""
+    cur = conn.execute("PRAGMA table_info(download_days)")
+    existing = {row[1] for row in cur.fetchall()}
+    for col in _FILE_ID_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE download_days ADD COLUMN {col} TEXT")
+    conn.commit()
 
 
 def utc_now() -> str:
@@ -47,8 +65,10 @@ def upsert_day(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         INSERT INTO download_days (
           symbol, provider, day, status, tick_status, bars_1s_status,
           tick_count, bars_1s_count, successful_hours, empty_hours, failed_hours,
-          tick_file_path, bars_1s_file_path, metadata_path, error, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          tick_file_path, bars_1s_file_path, metadata_path,
+          tick_file_id, bars_1s_file_id, metadata_file_id, storage_message_ids,
+          error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol, provider, day) DO UPDATE SET
           status = excluded.status,
           tick_status = excluded.tick_status,
@@ -58,9 +78,13 @@ def upsert_day(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
           successful_hours = excluded.successful_hours,
           empty_hours = excluded.empty_hours,
           failed_hours = excluded.failed_hours,
-          tick_file_path = excluded.tick_file_path,
-          bars_1s_file_path = excluded.bars_1s_file_path,
-          metadata_path = excluded.metadata_path,
+          tick_file_path = COALESCE(excluded.tick_file_path, download_days.tick_file_path),
+          bars_1s_file_path = COALESCE(excluded.bars_1s_file_path, download_days.bars_1s_file_path),
+          metadata_path = COALESCE(excluded.metadata_path, download_days.metadata_path),
+          tick_file_id = COALESCE(excluded.tick_file_id, download_days.tick_file_id),
+          bars_1s_file_id = COALESCE(excluded.bars_1s_file_id, download_days.bars_1s_file_id),
+          metadata_file_id = COALESCE(excluded.metadata_file_id, download_days.metadata_file_id),
+          storage_message_ids = COALESCE(excluded.storage_message_ids, download_days.storage_message_ids),
           error = excluded.error,
           updated_at = excluded.updated_at
         """,
@@ -79,8 +103,48 @@ def upsert_day(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             row.get("tick_file_path"),
             row.get("bars_1s_file_path"),
             row.get("metadata_path"),
+            row.get("tick_file_id"),
+            row.get("bars_1s_file_id"),
+            row.get("metadata_file_id"),
+            row.get("storage_message_ids"),
             row.get("error"),
             utc_now(),
+        ),
+    )
+    conn.commit()
+
+
+def set_day_file_ids(
+    conn: sqlite3.Connection,
+    symbol: str,
+    day: str,
+    *,
+    provider: str = "dukascopy",
+    tick_file_id: str | None = None,
+    bars_1s_file_id: str | None = None,
+    metadata_file_id: str | None = None,
+    storage_message_ids: str | None = None,
+) -> None:
+    """Update only the Telegram file_id fields after a successful channel upload."""
+    conn.execute(
+        """
+        UPDATE download_days SET
+          tick_file_id = COALESCE(?, tick_file_id),
+          bars_1s_file_id = COALESCE(?, bars_1s_file_id),
+          metadata_file_id = COALESCE(?, metadata_file_id),
+          storage_message_ids = COALESCE(?, storage_message_ids),
+          updated_at = ?
+        WHERE symbol = ? AND provider = ? AND day = ?
+        """,
+        (
+            tick_file_id,
+            bars_1s_file_id,
+            metadata_file_id,
+            storage_message_ids,
+            utc_now(),
+            symbol,
+            provider,
+            day,
         ),
     )
     conn.commit()

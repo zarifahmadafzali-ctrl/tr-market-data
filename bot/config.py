@@ -37,6 +37,19 @@ def admin_ids() -> set[int]:
     return ids
 
 
+def storage_channel_id() -> int | None:
+    """Private channel/group ID where finished files are archived.
+    Bot must be admin with Post Messages. Example: -1001234567890
+    """
+    raw = (os.getenv("TELEGRAM_STORAGE_CHANNEL_ID") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def sqlite_path() -> Path:
     p = os.getenv("SQLITE_PATH") or "db/tr_market_data.sqlite"
     path = Path(p)
@@ -68,18 +81,24 @@ def public_access_enabled() -> bool:
 TELEGRAM_MAX_UPLOAD_BYTES = 45 * 1024 * 1024
 
 
-def archive_enabled() -> bool:
-    return _bool("TELEGRAM_ARCHIVE_ENABLED", False)
-
-
 def archive_channel_id() -> int | None:
-    raw = (os.getenv("TELEGRAM_ARCHIVE_CHANNEL_ID") or "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+    """Prefer TELEGRAM_ARCHIVE_CHANNEL_ID; fall back to TELEGRAM_STORAGE_CHANNEL_ID."""
+    for name in ("TELEGRAM_ARCHIVE_CHANNEL_ID", "TELEGRAM_STORAGE_CHANNEL_ID"):
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def archive_enabled() -> bool:
+    # Explicit flag, or auto-enable when a channel id is configured
+    if _bool("TELEGRAM_ARCHIVE_ENABLED", False):
+        return True
+    return archive_channel_id() is not None
 
 
 def archive_max_retries() -> int:

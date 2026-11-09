@@ -1,4 +1,5 @@
--- Catalog only. Bulk market data lives in Parquet files under data/.
+-- Catalog only. Bulk market data lives in Parquet files under data/
+-- and is also archived to a private Telegram channel via file_id.
 
 CREATE TABLE IF NOT EXISTS symbols (
   symbol TEXT PRIMARY KEY,
@@ -22,6 +23,11 @@ CREATE TABLE IF NOT EXISTS download_days (
   tick_file_path TEXT,
   bars_1s_file_path TEXT,
   metadata_path TEXT,
+  -- Telegram channel file_ids (survive local disk loss)
+  tick_file_id TEXT,
+  bars_1s_file_id TEXT,
+  metadata_file_id TEXT,
+  storage_message_ids TEXT,
   error TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (symbol, provider, day)
