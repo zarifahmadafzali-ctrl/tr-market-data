@@ -5,10 +5,18 @@ from __future__ import annotations
 import logging
 import sys
 
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from bot.config import admin_ids, telegram_token
+
 from bot.handlers import (
+    cmd_backfill,
     cmd_cancel,
     cmd_get,
     cmd_help,
@@ -17,6 +25,7 @@ from bot.handlers import (
     cmd_status,
     cmd_symbols,
     on_callback,
+    on_document,
 )
 
 logging.basicConfig(
@@ -45,6 +54,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("get", cmd_get))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("backfill", cmd_backfill))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(CallbackQueryHandler(on_callback))
     return app
 

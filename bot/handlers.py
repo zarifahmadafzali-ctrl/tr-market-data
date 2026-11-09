@@ -10,6 +10,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.auth import can_use_bot, deny_message, is_admin
+from bot.backfill import (
+    BackfillError,
+    backfill_context_summary,
+    parse_archive_document,
+    register_legacy_artifact,
+)
 from bot.config import data_root, rate_limit_per_minute, sqlite_path
 from bot.parsers import GetRequest, parse_get_args, supported_symbols
 from bot.rate_limit import RateLimiter
@@ -122,16 +128,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Commands:\n"
         "/start — main menu\n"
-        "/status — catalog + active jobs\n"
+        "/status — catalog + active jobs + archive counts\n"
         "/symbols — supported symbols\n"
         "/get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both]\n"
         "/jobs — recent and active jobs\n"
         "/cancel JOB_ID — cancel a job (admin)\n"
+        "/backfill [SYMBOL YYYY-MM-DD] — index existing Telegram archive files (admin)\n"
         "/help — this message\n\n"
         "Examples:\n"
-        "/get US30 2024-06-12 tick\n"
-        "/get US30 2024-06-12 1s\n"
-        "/get US30 2024-06-10 2024-06-12 both\n"
+        "/get US30 2026-11-08 tick\n"
+        "/backfill US30 2026-11-07\n"
+        "Then forward the 3 archive documents from the private channel.\n"
     )
     await update.message.reply_text(text)
 
@@ -145,6 +152,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"SUCCESS days: {snap['success_days']}",
         f"Active jobs: {snap['active_jobs']}",
     ]
+    arch = snap.get("archive") or {}
+    if arch:
+        lines.append(
+            f"Archive INDEXED: {arch.get('indexed_artifacts', 0)}  pending: {arch.get('pending', 0)}"
+        )
     for j in snap["jobs"]:
         lines.append(f"  #{j['id']} {j['status']} {j['range']} {j['symbols']}")
     await update.message.reply_text("\n".join(lines) or "No data yet.")
@@ -395,3 +407,113 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await context.bot.send_message(
                     chat_id=q.message.chat_id, text=f"Send failed: {e}"
                 )
+
+
+async def cmd_backfill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: set symbol/day context and/or instructions for forwarding archive docs."""
+    if not await _gate(update):
+        return
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await update.message.reply_text("Only admins can backfill the archive index.")
+        return
+
+    args = context.args or []
+    if len(args) >= 2:
+        try:
+            from bot.parsers import parse_date
+            from downloader.symbols import normalize_symbol
+            sym = normalize_symbol(args[0])
+            day = parse_date(args[1]).isoformat()
+        except ValueError as e:
+            await update.message.reply_text(str(e))
+            return
+        context.user_data["backfill_symbol"] = sym
+        context.user_data["backfill_day"] = day
+        context.user_data["backfill_mode"] = True
+        await update.message.reply_text(
+            f"Backfill context set: {sym} {day}.\n"
+            "Forward the archive documents (ticks.parquet, bars_1s.parquet, "
+            "metadata.json) from the private channel to this chat.\n"
+            "Each file will be indexed into the GitHub manifest without re-upload.\n"
+            "Send /backfill clear to exit."
+        )
+        return
+
+    if args and args[0].lower() in ("clear", "off", "stop", "done"):
+        context.user_data.pop("backfill_symbol", None)
+        context.user_data.pop("backfill_day", None)
+        context.user_data.pop("backfill_mode", None)
+        await update.message.reply_text("Backfill context cleared.")
+        return
+
+    context.user_data["backfill_mode"] = True
+    await update.message.reply_text(
+        "Backfill mode on.\n"
+        "Option A: /backfill SYMBOL YYYY-MM-DD then forward files.\n"
+        "Option B: forward files that already have full captions "
+        "(dukascopy|SYMBOL|YYYY-MM-DD|ticks_parquet).\n"
+        f"{backfill_context_summary(context.user_data)}\n"
+        "Send /backfill clear when finished."
+    )
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: register forwarded archive documents into the durable index."""
+    if not await _gate(update):
+        return
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        return
+    msg = update.message
+    if not msg or not msg.document:
+        return
+
+    # Only process when in backfill mode or caption looks like an archive key
+    caption = msg.caption or ""
+    in_mode = bool(context.user_data.get("backfill_mode"))
+    looks_like_archive = "|" in caption or (msg.document.file_name or "").endswith(
+        (".parquet", ".json")
+    )
+    if not in_mode and not looks_like_archive:
+        return
+
+    doc = msg.document
+    try:
+        parsed = parse_archive_document(
+            file_id=doc.file_id,
+            file_name=doc.file_name,
+            caption=caption,
+            file_unique_id=getattr(doc, "file_unique_id", None),
+            message_id=msg.message_id,
+            chat_id=msg.chat_id,
+            file_size=getattr(doc, "file_size", None),
+            hint_symbol=context.user_data.get("backfill_symbol"),
+            hint_day=context.user_data.get("backfill_day"),
+        )
+    except BackfillError as e:
+        await msg.reply_text(f"Backfill parse error: {e}")
+        return
+
+    result = register_legacy_artifact(sqlite_path(), parsed, write_manifest=True)
+    if not result.get("ok"):
+        await msg.reply_text(
+            f"Backfill failed ({result.get('action')}): {result.get('error')}"
+        )
+        return
+
+    extra = ""
+    if result.get("manifest_enabled") and not result.get("manifest_written"):
+        if result.get("action") == "already_indexed":
+            extra = " (already in index)"
+        else:
+            extra = " (SQLite only — manifest not updated)"
+    elif result.get("manifest_written"):
+        extra = " + GitHub manifest"
+
+    await msg.reply_text(
+        f"Indexed {result['symbol']} {result['day']} {result['file_name']}\n"
+        f"action={result['action']} key={result['artifact_key']}{extra}"
+    )
+
+

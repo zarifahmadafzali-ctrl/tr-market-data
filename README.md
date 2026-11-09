@@ -114,6 +114,39 @@ Notes:
 - Prefer a longer uptime check interval (5–10 min) to avoid extra load.
 - Run **one** instance only (Telegram allows a single `getUpdates` consumer).
 
+
+## Legacy archive backfill (admin)
+
+Telegram files uploaded **before** GitHub manifest support are not in the
+durable index. After a Render disk wipe they look “missing” and `/get` would
+queue a new Dukascopy download.
+
+**Do not re-download.** Index the existing channel documents:
+
+1. In the private archive channel, find the three files for the day
+   (`ticks.parquet`, `bars_1s.parquet`, `metadata.json`).
+2. In a private chat with the bot (admin account):
+
+```text
+/backfill US30 2026-11-07
+```
+
+3. Forward each of the three documents to the bot.
+4. The bot registers each `file_id` into SQLite and the GitHub manifest.
+5. Confirm:
+
+```text
+/get US30 2026-11-07 tick
+```
+
+You should see **Ready** and delivery **(archive)** with **no new job**.
+
+If captions already contain `dukascopy|SYMBOL|YYYY-MM-DD|ticks_parquet`, you can
+forward without `/backfill SYMBOL DAY` first.
+
+`/backfill clear` exits context mode.
+
+
 ## License
 
 

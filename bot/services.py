@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from bot.manifest import lookup_package, rebuild_sqlite_from_manifest, fetch_manifest, empty_manifest
 from bot.archive import (
     enqueue_archive_for_day,
     get_indexed_artifacts,
@@ -58,6 +59,35 @@ def status_snapshot(db_path: Path) -> dict[str, Any]:
             for j in active[:20]
         ],
     }
+
+
+
+def _hydrate_from_manifest(db_path: Path, symbol: str, day: str, provider: str = "dukascopy") -> dict:
+    """Pull one package from the GitHub manifest into SQLite when missing locally."""
+    from bot.config import manifest_enabled, manifest_token, manifest_repo
+    from bot.archive import package_key, recompute_package_status, STATUS_INDEXED
+    from bot.manifest import fetch_manifest, rebuild_sqlite_from_manifest
+    from downloader.symbols import normalize_symbol
+
+    if not manifest_enabled() or not manifest_token() or not manifest_repo():
+        return {"status": "disabled"}
+    sym = normalize_symbol(symbol)
+    pk = package_key(provider, sym, day)
+    manifest, _sha, st = fetch_manifest()
+    if st != "ok" or not manifest:
+        return {"status": st or "error"}
+    packages = manifest.get("packages") or {}
+    if pk not in packages:
+        return {"status": "missing_package"}
+    # Rebuild only this package by constructing a filtered manifest
+    filtered = {
+        "schema_version": manifest.get("schema_version", 1),
+        "updated_at": manifest.get("updated_at", ""),
+        "packages": {pk: packages[pk]},
+    }
+    stats = rebuild_sqlite_from_manifest(db_path, filtered)
+    return {"status": "ok", "stats": stats, "package_key": pk}
+
 
 
 def handle_get_request(
