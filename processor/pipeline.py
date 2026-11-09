@@ -1,4 +1,4 @@
-"""Day pipeline: download → ticks parquet → 1s bars parquet → catalog."""
+"""Day pipeline: download → ticks parquet → 1s bars parquet → catalog → channel archive."""
 
 from __future__ import annotations
 
@@ -71,13 +71,14 @@ def run_day_pipeline(
                 "failed_hours": existing.get("failed_hours", 0),
             }
         )
+        # Still try to archive if file_ids are missing
+        _try_archive(db_path, sym, day.isoformat(), provider, existing)
         return result
 
     need_hours = list(range(24)) if force else hours_to_fetch(db, sym, day.isoformat(), provider)
     known = get_hour_statuses(db, sym, day.isoformat(), provider)
 
-    # Seed classification-only placeholders for already-good hours (no ticks in memory yet —
-    # full day ticks are rebuilt from parquet merge after download).
+    # Seed classification-only placeholders for already-good hours
     seed = [
         {"hour": h, "ticks": [], "classification": known[h], "status": 0, "error": None, "attempts": 0}
         for h in range(24)
@@ -90,7 +91,6 @@ def run_day_pipeline(
                 download_day(symbol, day, hours=need_hours, seed_hour_results=seed)
             )
         else:
-            # All hours already classified — still ensure parquet/bars exist
             downloaded = {
                 "symbol": sym,
                 "day": day.isoformat(),
@@ -141,7 +141,7 @@ def run_day_pipeline(
     bpath = bars_1s_parquet_path(dpath)
     mpath = metadata_json_path(dpath)
 
-    # Merge new ticks with any existing parquet ticks (idempotent by time+bid+ask)
+    # Merge new ticks with any existing parquet ticks
     new_ticks = list(downloaded.get("ticks") or [])
     existing_ticks: list[dict[str, Any]] = []
     if tpath.exists() and tpath.stat().st_size > 0:
@@ -261,6 +261,21 @@ def run_day_pipeline(
         },
     )
 
+    # Archive to private Telegram channel so files survive ephemeral disk
+    archive_info: dict[str, Any] = {}
+    if final in ("SUCCESS", "EXPECTED_EMPTY"):
+        archive_info = _try_archive(
+            db_path,
+            sym,
+            day.isoformat(),
+            provider,
+            {
+                "tick_file_path": str(tpath),
+                "bars_1s_file_path": str(bpath),
+                "metadata_path": str(mpath),
+            },
+        )
+
     result.update(
         {
             "status": final,
@@ -278,9 +293,36 @@ def run_day_pipeline(
             "tick_file_bytes": tpath.stat().st_size if tpath.exists() else 0,
             "bars_file_bytes": bpath.stat().st_size if bpath.exists() else 0,
             "error": error,
+            "channel_archive": archive_info,
         }
     )
     return result
+
+
+def _try_archive(
+    db_path: Path,
+    symbol: str,
+    day: str,
+    provider: str,
+    paths: dict[str, Any],
+) -> dict[str, Any]:
+    """Best-effort upload to Telegram storage channel."""
+    try:
+        from bot.channel_storage import upload_day_to_channel_sync
+        from pathlib import Path as P
+
+        return upload_day_to_channel_sync(
+            db_path=db_path,
+            symbol=symbol,
+            day=day,
+            tick_path=P(paths["tick_file_path"]) if paths.get("tick_file_path") else None,
+            bars_path=P(paths["bars_1s_file_path"]) if paths.get("bars_1s_file_path") else None,
+            metadata_path=P(paths["metadata_path"]) if paths.get("metadata_path") else None,
+            provider=provider,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("channel archive failed for %s %s", symbol, day)
+        return {"error": str(e)}
 
 
 def _merge_ticks(existing: list[dict[str, Any]], new: list[dict[str, Any]]) -> list[dict[str, Any]]:
