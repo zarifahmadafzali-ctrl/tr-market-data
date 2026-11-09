@@ -37,6 +37,19 @@ def admin_ids() -> set[int]:
     return ids
 
 
+def storage_channel_id() -> int | None:
+    """Private channel/group ID where finished files are archived.
+    Bot must be admin with Post Messages. Example: -1001234567890
+    """
+    raw = (os.getenv("TELEGRAM_STORAGE_CHANNEL_ID") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def sqlite_path() -> Path:
     p = os.getenv("SQLITE_PATH") or "db/tr_market_data.sqlite"
     path = Path(p)
