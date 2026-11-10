@@ -49,3 +49,71 @@ test("parseAdmins", () => {
   const s = mod.parseAdmins("1, 2;3");
   assert.ok(s.has(1) && s.has(2) && s.has(3));
 });
+
+test("parseCommand routes", () => {
+  assert.equal(mod.parseCommand("/start").type, "/start");
+  assert.equal(mod.parseCommand("/status@bot").type, "/status");
+  assert.equal(mod.parseCommand("/help").type, "/help");
+  assert.equal(mod.parseCommand("/jobs").type, "/jobs");
+  assert.equal(mod.parseCommand("/symbols").type, "/symbols");
+  assert.equal(mod.parseCommand("/get US30 2024-01-01").type, "/get");
+  assert.equal(mod.parseCommand("hello").type, "unknown");
+});
+
+test("welcomeText is not the same as helpText", () => {
+  const w = mod.welcomeText();
+  const h = mod.helpText();
+  assert.ok(w.includes("Dukascopy"));
+  assert.ok(w.includes("private Telegram channel"));
+  assert.ok(h.includes("/status"));
+  assert.ok(h.includes("/jobs"));
+  assert.notEqual(w, h);
+});
+
+test("mainMenuKeyboard has required buttons", () => {
+  const kb = mod.mainMenuKeyboard();
+  const data = kb.inline_keyboard.flat().map((b) => b.callback_data);
+  for (const need of ["menu:status", "menu:symbols", "menu:get", "menu:jobs", "menu:help"]) {
+    assert.ok(data.includes(need), need);
+  }
+});
+
+test("formatStatus does not claim engine running", () => {
+  const t = mod.formatStatus({
+    workerOk: true,
+    queueSummary: "Queue files: 0",
+    manifestSummary: "Manifest packages: 0; artifacts with file_id/INDEXED: 0",
+    note: "Engine activity is shown only via queue file statuses",
+  });
+  assert.ok(t.includes("Worker webhook: available"));
+  assert.ok(!/engine is running/i.test(t));
+});
+
+test("summarizeQueue and formatJobs", () => {
+  const reqs = [
+    { id: "abcdef012345", status: "queued", symbol: "USA30IDXUSD", start: "2024-06-12", end: "2024-06-12", created_at: "2024-06-12T00:00:00+00:00" },
+    { id: "bbbbbb012345", status: "running", symbol: "EURUSD", start: "2024-01-01", end: "2024-01-02", created_at: "2024-06-13T00:00:00+00:00" },
+  ];
+  assert.match(mod.summarizeQueue(reqs), /queued=1/);
+  assert.match(mod.summarizeQueue(reqs), /running=1/);
+  const jobs = mod.formatJobs(reqs);
+  assert.match(jobs, /running/);
+  assert.match(jobs, /EURUSD/);
+});
+
+test("summarizeManifest counts packages", () => {
+  const man = {
+    packages: {
+      "dukascopy|USA30IDXUSD|2024-06-12": {
+        artifacts: { "ticks.parquet": { file_id: "x", status: "INDEXED" } },
+      },
+    },
+  };
+  assert.match(mod.summarizeManifest(man), /packages: 1/);
+});
+
+test("supportedSymbolsList includes US30 alias", () => {
+  const list = mod.supportedSymbolsList().join("\n");
+  assert.match(list, /US30/);
+  assert.match(list, /USA30IDXUSD/);
+});
