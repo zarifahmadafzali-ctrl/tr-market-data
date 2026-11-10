@@ -241,3 +241,29 @@ archives after enablement are indexed going forward.
 
 The bot keeps running on local SQLite. Manifest sync is retried later. Temporary
 GitHub outages do not by themselves trigger Dukascopy re-downloads.
+
+## Free SQLite backup to GitHub
+
+Render Free disks are ephemeral. The catalog SQLite file is small (metadata only).
+When enabled, the bot:
+
+1. **On startup** downloads `backups/tr_market_data.sqlite` from the private
+   GitHub repo (if present) before recovering jobs / archive state.
+2. **After each finished job** (and on SIGTERM) uploads a consistent snapshot
+   via the SQLite backup API + GitHub Contents API.
+3. **Periodically** (rate-limited) may push again while idle.
+
+Enable with:
+
+```
+SQLITE_BACKUP_ENABLED=true
+# optional overrides — defaults reuse ARCHIVE_MANIFEST_REPO / TOKEN
+SQLITE_BACKUP_PATH=backups/tr_market_data.sqlite
+SQLITE_BACKUP_MIN_INTERVAL_SEC=120
+```
+
+Notes:
+
+- Binary git history grows; do not push every second.
+- Concurrent multi-instance writers can race (409 retries help; prefer one instance).
+- Telegram still holds Parquet blobs; GitHub holds the catalog + JSON manifest index.

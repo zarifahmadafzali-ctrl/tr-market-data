@@ -10,6 +10,7 @@ import time
 
 from bot.archive import archive_tick, recover_stale_uploading, reconcile_success_days
 from bot.manifest import startup_sync_manifest
+from bot.sqlite_backup import push_sqlite_to_github, restore_sqlite_from_github
 from bot.config import archive_enabled, data_root, sqlite_path
 from scheduler.jobs import recover_stale_running_jobs
 from scheduler.runner import DownloadScheduler
@@ -21,6 +22,11 @@ log = logging.getLogger("bot.worker")
 def main() -> None:
     db = sqlite_path()
     data = data_root()
+    try:
+        br = restore_sqlite_from_github(db)
+        log.info("SQLite GitHub restore status=%s", br.get("status"))
+    except Exception as e:
+        log.warning("sqlite restore: %s", e)
     recover_stale_running_jobs(db)
     if archive_enabled():
         n = recover_stale_uploading(db)
@@ -40,6 +46,10 @@ def main() -> None:
         result = sched.tick()
         if result:
             log.info("Download job finished: %s", result.get("status"))
+            try:
+                push_sqlite_to_github(db, reason=f"job_{result.get('status')}", force=True)
+            except Exception as e:
+                log.warning("sqlite backup after job: %s", e)
         arch = None
         if archive_enabled():
             try:

@@ -21,6 +21,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from bot.archive import archive_tick, recover_stale_uploading, reconcile_success_days
 from bot.manifest import startup_sync_manifest
+from bot.sqlite_backup import (
+    maybe_periodic_backup,
+    push_sqlite_to_github,
+    restore_sqlite_from_github,
+)
 from bot.config import archive_enabled, data_root, sqlite_path, telegram_token, archive_channel_id
 from scheduler.jobs import recover_stale_running_jobs
 from scheduler.runner import DownloadScheduler
@@ -76,6 +81,12 @@ def _serve_health() -> None:
 def _run_worker() -> None:
     db = sqlite_path()
     data = data_root()
+    # 1) Restore catalog from GitHub before any recovery/job logic
+    try:
+        br = restore_sqlite_from_github(db)
+        log.info("SQLite GitHub restore status=%s", br.get("status"))
+    except Exception as e:
+        log.exception("sqlite restore failed (continuing with local): %s", e)
     try:
         recover_stale_running_jobs(db)
     except Exception as e:
@@ -87,13 +98,13 @@ def _run_worker() -> None:
             reconcile_success_days(db)
         except Exception as e:
             log.exception("archive recovery failed: %s", e)
+    else:
+        log.info("Telegram archive disabled (TELEGRAM_ARCHIVE_ENABLED not true)")
     try:
         sync = startup_sync_manifest(db)
         log.info("GitHub manifest sync status=%s stats=%s", sync.get("status"), sync.get("stats"))
     except Exception as e:
         log.exception("manifest startup sync error (continuing): %s", e)
-    else:
-        log.info("Telegram archive disabled (TELEGRAM_ARCHIVE_ENABLED not true)")
     sched = DownloadScheduler(db, data)
     log.info("Worker loop started db=%s data=%s archive=%s", db, data, archive_enabled())
     while not _stop.is_set():
@@ -101,15 +112,28 @@ def _run_worker() -> None:
             result = sched.tick()
             if result:
                 log.info("Job finished: %s", result.get("status"))
+                try:
+                    push_sqlite_to_github(db, reason=f"job_{result.get('status')}", force=True)
+                except Exception as e:
+                    log.warning("sqlite backup after job: %s", e)
             arch = None
             if archive_enabled():
                 try:
                     arch = archive_tick(db)
                     if arch:
                         log.info("Archive step: %s", arch.get("status"))
+                        if arch.get("status") == "INDEXED":
+                            try:
+                                push_sqlite_to_github(db, reason="archive_indexed")
+                            except Exception as e:
+                                log.warning("sqlite backup after archive: %s", e)
                 except Exception as e:
                     log.exception("archive tick error: %s", e)
             if not result and not arch:
+                try:
+                    maybe_periodic_backup(db)
+                except Exception:
+                    pass
                 _stop.wait(5)
         except Exception as e:
             log.exception("Worker tick error: %s", e)
@@ -139,6 +163,10 @@ def main() -> None:
     def _on_signal(signum, _frame) -> None:
         log.info("Signal %s received — shutting down", signum)
         _stop.set()
+        try:
+            push_sqlite_to_github(reason="shutdown", force=True)
+        except Exception as e:
+            log.warning("sqlite backup on shutdown: %s", e)
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)

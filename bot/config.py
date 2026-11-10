@@ -146,3 +146,50 @@ def manifest_path() -> str:
 def manifest_token() -> str:
     """GitHub PAT for private manifest repo. Never log this value."""
     return (os.getenv("ARCHIVE_MANIFEST_TOKEN") or "").strip()
+
+
+def sqlite_backup_enabled() -> bool:
+    """Mirror SQLite catalog file to private GitHub (binary Contents API)."""
+    return _bool("SQLITE_BACKUP_ENABLED", False)
+
+
+def sqlite_backup_repo() -> str:
+    # Prefer dedicated override; fall back to manifest repo
+    return (os.getenv("SQLITE_BACKUP_REPO") or os.getenv("ARCHIVE_MANIFEST_REPO") or "").strip()
+
+
+def sqlite_backup_branch() -> str:
+    return (
+        (os.getenv("SQLITE_BACKUP_BRANCH") or os.getenv("ARCHIVE_MANIFEST_BRANCH") or "main").strip()
+        or "main"
+    )
+
+
+def sqlite_backup_path() -> str:
+    """Path inside the GitHub repo for the sqlite file."""
+    return (
+        (os.getenv("SQLITE_BACKUP_PATH") or "backups/tr_market_data.sqlite").strip()
+        or "backups/tr_market_data.sqlite"
+    )
+
+
+def sqlite_backup_token() -> str:
+    return (
+        (os.getenv("SQLITE_BACKUP_TOKEN") or os.getenv("ARCHIVE_MANIFEST_TOKEN") or "").strip()
+    )
+
+
+def sqlite_backup_min_interval_sec() -> int:
+    """Minimum seconds between uploads (rate-limit Git history growth)."""
+    try:
+        return max(30, int(os.getenv("SQLITE_BACKUP_MIN_INTERVAL_SEC") or "120"))
+    except ValueError:
+        return 120
+
+
+def sqlite_backup_max_bytes() -> int:
+    """Refuse upload if snapshot exceeds this (GitHub Contents practical limit)."""
+    try:
+        return max(1_000_000, int(os.getenv("SQLITE_BACKUP_MAX_BYTES") or str(40 * 1024 * 1024)))
+    except ValueError:
+        return 40 * 1024 * 1024
