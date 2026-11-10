@@ -8,8 +8,8 @@ Render polling is NOT extended in this phase.
 - [x] P1b  CLI `scripts/actions_engine.py` + workflow `.github/workflows/engine.yml`
 - [x] P1c  unit tests for queue + run loop (fakes, no network)
 - [ ] P1d  owner pilot: secrets on Actions, one day then one week, measure minutes/day
-- [ ] P2a  Cloudflare Worker webhook
-- [ ] P2b  Worker tests + setWebhook
+- [ ] [x] P2a  Cloudflare Worker (`worker/`): webhook, admin, manifest hit, queue+dispatch
+- [ ] [x] P2b  Worker pure tests + deploy brief (setWebhook after stopping Render poll)
 - [ ] P3   disable Render polling
 
 ## Layout
