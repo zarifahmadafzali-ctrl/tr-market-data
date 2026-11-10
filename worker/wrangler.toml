@@ -1,3 +1,15 @@
-name = "tr-market-data-bot"
+name = "tr-market-data"
 main = "src/index.mjs"
 compatibility_date = "2024-11-01"
+
+# Non-secret runtime configuration only.
+# Secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, ARCHIVE_MANIFEST_TOKEN,
+# ENGINE_DISPATCH_TOKEN) must be set via `wrangler secret put` or the Cloudflare dashboard.
+# TELEGRAM_ADMIN_IDS is a non-secret runtime variable — set it in the Cloudflare dashboard
+# (or `wrangler secret put` if you prefer); do not commit personal IDs here.
+[vars]
+ARCHIVE_MANIFEST_REPO = "zarifahmadafzali-ctrl/tr-market-archive-index"
+ENGINE_DISPATCH_REPO = "zarifahmadafzali-ctrl/tr-market-data"
+ARCHIVE_MANIFEST_BRANCH = "main"
+ARCHIVE_MANIFEST_PATH = "archive_manifest.json"
+ENGINE_WORKFLOW_ID = "engine.yml"
