@@ -285,13 +285,14 @@ def run_day_pipeline(
 
 
     # Durable Telegram archive (optional; disabled unless TELEGRAM_ARCHIVE_ENABLED)
+    archive_info = None
     if final in ("SUCCESS", "EXPECTED_EMPTY"):
         try:
             from bot.archive import enqueue_archive_for_day
             from bot.config import archive_enabled
 
             if archive_enabled():
-                enqueue_archive_for_day(
+                archive_info = enqueue_archive_for_day(
                     db_path if isinstance(db_path, Path) else Path(str(db_path)),
                     sym,
                     day.isoformat(),
@@ -300,6 +301,7 @@ def run_day_pipeline(
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("archive enqueue failed for %s %s: %s", sym, day, e)
+            archive_info = {"error": str(e)}
 
     result.update(
         {
