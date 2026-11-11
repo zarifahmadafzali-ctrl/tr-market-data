@@ -26,6 +26,13 @@ test("parseGet rejects inverted range", () => {
   assert.equal(mod.parseGet("/get US30 2024-06-10 2024-06-01"), null);
 });
 
+test("parseGet rejects date used as symbol (missing SYMBOL)", () => {
+  const p = mod.parseGet("/get 2024-12-07 2024-12-14 tick");
+  assert.ok(p && p.error === "missing_symbol");
+  assert.match(p.message, /Missing SYMBOL/i);
+  assert.equal(mod.parseGet("/get US30 2024-12-07 2024-12-14 tick").symbol, "US30");
+});
+
 test("findArtifacts + pick kind", () => {
   const man = {
     packages: {

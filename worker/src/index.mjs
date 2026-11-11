@@ -56,17 +56,28 @@ export function supportedSymbolsList() {
 }
 
 /** /get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both] */
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 export function parseGet(text) {
   const parts = String(text || "").trim().split(/\s+/);
   if (parts.length < 3) return null;
   const cmd = parts[0].split("@")[0].toLowerCase();
   if (cmd !== "/get") return null;
   const symbol = parts[1];
+  // Reject "/get 2024-12-07 2024-12-14 …" (missing symbol — date was parsed as symbol).
+  if (ISO_DAY.test(symbol)) {
+    return {
+      error: "missing_symbol",
+      message:
+        "Missing SYMBOL. Use:\n/get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both]\n\n" +
+        "Example:\n/get US30 2024-12-07 2024-12-14 tick",
+    };
+  }
   const start = parts[2];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return null;
+  if (!ISO_DAY.test(start)) return null;
   let end = start;
   let kind = "both";
-  if (parts[3] && /^\d{4}-\d{2}-\d{2}$/.test(parts[3])) {
+  if (parts[3] && ISO_DAY.test(parts[3])) {
     end = parts[3];
     if (parts[4]) kind = parts[4].toLowerCase();
   } else if (parts[3]) {
@@ -409,12 +420,14 @@ async function replyJobs(token, chatId, messageId, env, edit) {
 
 async function handleGet(token, chatId, userId, text, env) {
   const parsed = parseGet(text);
-  if (!parsed) {
+  if (!parsed || parsed.error) {
     await tg(token, "sendMessage", {
       chat_id: chatId,
-      text: "Usage: /get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both]",
+      text:
+        (parsed && parsed.message) ||
+        "Usage: /get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both]\n\nExample: /get US30 2024-12-07 2024-12-14 tick",
     });
-    return { ok: true, error: "bad_args" };
+    return { ok: true, error: (parsed && parsed.error) || "bad_args" };
   }
 
   const repo = env.ARCHIVE_MANIFEST_REPO;
