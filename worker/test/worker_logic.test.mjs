@@ -112,6 +112,13 @@ test("summarizeManifest counts packages", () => {
   assert.match(mod.summarizeManifest(man), /packages: 1/);
 });
 
+test("mapMenuText maps reply keyboard labels", () => {
+  assert.equal(mod.mapMenuText("📊 Status"), "/status");
+  assert.equal(mod.mapMenuText("📥 Get data"), "/get");
+  assert.equal(mod.mapMenuText("🏠 Menu"), "/start");
+  assert.equal(mod.mapMenuText("help"), "/help");
+});
+
 test("supportedSymbolsList includes US30 alias", () => {
   const list = mod.supportedSymbolsList().join("\n");
   assert.match(list, /US30/);

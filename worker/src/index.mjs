@@ -105,6 +105,20 @@ export function pickArtifactsForKind(arts, kind) {
   return order;
 }
 
+/** Persistent keyboard under the Telegram message box (no copy-paste). */
+export function replyMenuKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "📊 Status" }, { text: "📈 Symbols" }],
+      [{ text: "📥 Get data" }, { text: "📋 Jobs" }],
+      [{ text: "❓ Help" }, { text: "🏠 Menu" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+/** Inline buttons (still useful on the welcome message). */
 export function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -121,13 +135,59 @@ export function mainMenuKeyboard() {
   };
 }
 
+/** Map reply-keyboard labels (and common variants) to command names. */
+export function mapMenuText(text) {
+  const t = String(text || "").trim();
+  const lower = t.toLowerCase();
+  const table = {
+    "📊 status": "/status",
+    "📈 symbols": "/symbols",
+    "📥 get data": "/get",
+    "📋 jobs": "/jobs",
+    "❓ help": "/help",
+    "🏠 menu": "/start",
+    status: "/status",
+    symbols: "/symbols",
+    "get data": "/get",
+    jobs: "/jobs",
+    help: "/help",
+    menu: "/start",
+    start: "/start",
+  };
+  if (table[lower]) return table[lower];
+  if (table[t]) return table[t];
+  return null;
+}
+
+export const BOT_COMMANDS = [
+  { command: "start", description: "Open menu" },
+  { command: "status", description: "Worker + queue status" },
+  { command: "symbols", description: "Supported symbols" },
+  { command: "get", description: "Get data: /get SYMBOL YYYY-MM-DD ..." },
+  { command: "jobs", description: "Queue jobs" },
+  { command: "help", description: "Command help" },
+];
+
+export async function ensureBotCommands(token) {
+  if (!token) return;
+  try {
+    await fetch(`${TG}/bot${token}/setMyCommands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commands: BOT_COMMANDS }),
+    });
+  } catch {
+    /* non-fatal */
+  }
+}
+
 export function welcomeText() {
   return (
     "TR Market Data Bot\n\n" +
     "Historical Dukascopy tick and 1-second OHLC data.\n" +
     "Completed files are archived in a private Telegram channel so they survive server restarts.\n" +
     "The download engine runs on GitHub Actions; this Worker is the always-on Telegram front door.\n\n" +
-    "Use the menu buttons or /help for commands."
+    "Use the buttons under the message box, the / menu next to the input, or type a command."
   );
 }
 
@@ -424,7 +484,7 @@ async function handleGet(token, chatId, userId, text, env) {
       `Queued ${reqBody.symbol} ${reqBody.start}..${reqBody.end}.\n` +
       `request_id=${id}\n` +
       `engine_dispatch=${dis.ok ? "ok" : "failed:" + dis.status}\n` +
-      `You will be notified when the Actions job finishes.`,
+      `When the job finishes, ZIP part(s) of your requested data are sent to this chat (not only the private archive channel).`,
   });
   return { ok: true, queued: id, dispatch: dis.ok };
 }
@@ -527,19 +587,52 @@ export default {
       return json({ ok: true, unauthorized: true });
     }
 
-    const { type: cmd } = parseCommand(text);
+    // Reply-keyboard taps send plain text labels — map to commands
+    const mapped = mapMenuText(text);
+    const effectiveText = mapped && !text.startsWith("/") ? mapped : text;
+    let { type: cmd } = parseCommand(effectiveText);
+    if (mapped === "/get" && cmd === "unknown") {
+      cmd = "/get";
+    }
+    // "Get data" alone is not a full /get — show usage with keyboard
+    if (mapped === "/get" && !String(text).trim().toLowerCase().startsWith("/get")) {
+      await tg(token, "sendMessage", {
+        chat_id: chatId,
+        text:
+          "Send a request in this form:\n" +
+          "/get SYMBOL YYYY-MM-DD [YYYY-MM-DD] [tick|1s|both]\n\n" +
+          "Examples:\n" +
+          "/get US30 2024-06-12\n" +
+          "/get US30 2024-12-01 2024-12-30 both\n\n" +
+          "Single archived days arrive as files immediately.\n" +
+          "Ranges are processed by GitHub Actions; you receive ZIP part(s) in this chat when ready.",
+        reply_markup: replyMenuKeyboard(),
+      });
+      return json({ ok: true, command: "get_prompt" });
+    }
 
     if (cmd === "/start") {
+      await ensureBotCommands(token);
       await tg(token, "sendMessage", {
         chat_id: chatId,
         text: welcomeText(),
+        reply_markup: replyMenuKeyboard(),
+      });
+      // Second message: inline shortcuts (optional, same actions)
+      await tg(token, "sendMessage", {
+        chat_id: chatId,
+        text: "Quick actions:",
         reply_markup: mainMenuKeyboard(),
       });
       return json({ ok: true, command: "start" });
     }
 
     if (cmd === "/help") {
-      await tg(token, "sendMessage", { chat_id: chatId, text: helpText() });
+      await tg(token, "sendMessage", {
+        chat_id: chatId,
+        text: helpText(),
+        reply_markup: replyMenuKeyboard(),
+      });
       return json({ ok: true, command: "help" });
     }
 
