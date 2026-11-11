@@ -209,7 +209,9 @@ def process_request(
 
     mark_running()
     chat = req.get("requester_chat_id")
-    if isinstance(chat, str) and chat.isdigit():
+    if isinstance(chat, str) and chat.strip().lstrip("-").isdigit():
+        chat = int(chat.strip())
+    elif isinstance(chat, float):
         chat = int(chat)
     notifier.send_message(
         chat if isinstance(chat, int) else None,
