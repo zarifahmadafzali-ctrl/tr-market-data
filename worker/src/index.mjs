@@ -144,7 +144,7 @@ export function helpText() {
     "/get US30 2024-06-12\n" +
     "/get US30 2024-06-01 2024-06-07 both\n\n" +
     "Archived single days are sent immediately via Telegram file_id.\n" +
-    "Missing data is queued for the GitHub Actions engine."
+    "Date ranges are queued for GitHub Actions; when ready you get ephemeral ZIP part(s). Daily channel files remain the permanent archive."
   );
 }
 

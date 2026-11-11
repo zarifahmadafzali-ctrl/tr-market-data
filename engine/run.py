@@ -6,6 +6,8 @@ repo (queue/*.json + archive_manifest.json) and the Telegram channel.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -388,7 +390,55 @@ def process_request(
             else ""
         ),
     )
-    return {"status": final, "progress": progress}
+
+    # Ephemeral range ZIP delivery (daily archive remains source of truth)
+    pack_result: dict[str, Any] | None = None
+    deliverable = list(progress.get("done_days") or []) + list(progress.get("skipped_days") or [])
+    if (
+        isinstance(chat, int)
+        and cfg.telegram_token
+        and deliverable
+        and final in (STATUS_DONE, STATUS_PARTIAL, STATUS_FAILED)
+    ):
+        try:
+            from engine.range_package import deliver_range_package
+
+            kind = str(req.get("kind") or "both")
+            manifest_obj = None
+            try:
+                from bot.manifest import fetch_manifest
+
+                manifest_obj = fetch_manifest()
+            except Exception as e:  # noqa: BLE001
+                log.warning("manifest load for packaging: %s", e)
+
+            pack_result = deliver_range_package(
+                symbol=symbol,
+                start=start.isoformat(),
+                end=end.isoformat(),
+                kind=kind,
+                progress=progress,
+                data_root=Path(cfg.data_root),
+                db_path=Path(cfg.sqlite_path),
+                token=cfg.telegram_token,
+                chat_id=chat,
+                manifest=manifest_obj if isinstance(manifest_obj, dict) else None,
+                provider=cfg.provider,
+                send_document_path=lambda cid, path, cap: notifier.send_document_path(cid, path, cap),
+                send_message=lambda cid, text: notifier.send_message(cid, text),
+            )
+            log.info("range package result=%s", pack_result.get("status") if pack_result else None)
+        except Exception as e:  # noqa: BLE001
+            log.exception("range package failed: %s", e)
+            notifier.send_message(
+                chat,
+                f"Range ZIP packaging failed: {e}. Day archives remain available by single-day /get.",
+            )
+
+    out: dict[str, Any] = {"status": final, "progress": progress}
+    if pack_result is not None:
+        out["package"] = pack_result
+    return out
 
 
 def run_once(
