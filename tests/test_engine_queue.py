@@ -218,5 +218,50 @@ class TestProcessRequest(unittest.TestCase):
         self.assertEqual(out.get("next_day"), "2024-06-10")
 
 
+    def test_expected_empty_not_failed(self) -> None:
+        tr = MemTransport()
+        gh = GitHubContents("owner/index", "tok", transport=tr)
+        q = QueueStore(gh, prefix="queue")
+        req = new_request(symbol="US30", start="2024-06-08", end="2024-06-09")  # Sat-Sun style
+        q.create(req)
+        notifier = Notifier("bot-token", post=lambda u, f: (200, {"ok": True}))
+        cfg = EngineConfig(
+            index_repo="owner/index",
+            index_token="tok",
+            index_branch="main",
+            queue_prefix="queue",
+            manifest_path="archive_manifest.json",
+            telegram_token="bot-token",
+            archive_channel_id=-1001,
+            admin_ids=frozenset(),
+            sqlite_path=Path("/tmp/x.sqlite"),
+            data_root=Path("/tmp/data"),
+            max_seconds=3600,
+            day_margin_sec=60,
+            stale_sec=900,
+            max_archive_steps_per_day=3,
+            workflow_repo="owner/code",
+            workflow_id="engine.yml",
+            github_token_for_dispatch="tok",
+        )
+
+        def day_runner(symbol, day, **kwargs):
+            return {"status": "EXPECTED_EMPTY", "symbol": symbol, "day": day.isoformat()}
+
+        out = process_request(
+            req,
+            cfg,
+            queue=q,
+            notifier=notifier,
+            day_runner=day_runner,
+            archive_day=lambda *a, **k: {"status": "INDEXED"},
+            is_indexed=lambda *a, **k: False,
+            redispatch=lambda _rid: True,
+        )
+        self.assertEqual(out["status"], STATUS_DONE)
+        self.assertEqual(out["progress"]["failed_days"], [])
+        self.assertEqual(len(out["progress"].get("empty_days") or []), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

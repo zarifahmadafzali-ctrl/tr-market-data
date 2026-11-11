@@ -15,11 +15,15 @@ from downloader.symbols import normalize_symbol, point_divisor
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://datafeed.dukascopy.com/datafeed"
-_429_BACKOFF = (2.0, 5.0, 10.0, 20.0)
-_MAX_RETRY_AFTER = 60.0
-_MAX_429_ATTEMPTS = 5
+# Shared progressive backoff for rate-limit and transient upstream errors.
+_429_BACKOFF = (2.0, 5.0, 10.0, 20.0, 40.0, 60.0)
+# Transient 502/503/504 need more patience on GitHub Actions IPs.
+_503_BACKOFF = (3.0, 8.0, 15.0, 30.0, 45.0, 60.0, 90.0)
+_MAX_RETRY_AFTER = 90.0
+_MAX_429_ATTEMPTS = 8
+_MAX_503_ATTEMPTS = 8
 _MAX_OTHER_ATTEMPTS = 3
-_INTER_REQUEST_DELAY = 0.35
+_INTER_REQUEST_DELAY = 0.45
 
 
 def hour_url(dukascopy_id: str, day: date, hour: int) -> str:
@@ -52,7 +56,7 @@ async def download_hour_ticks(
     last_error = ""
     last_status = 0
     attempt = 0
-    max_attempts = _MAX_429_ATTEMPTS
+    max_attempts = max(_MAX_429_ATTEMPTS, _MAX_503_ATTEMPTS)
 
     while attempt < max_attempts:
         attempt += 1
@@ -88,12 +92,20 @@ async def download_hour_ticks(
                 await asyncio.sleep(delay)
                 continue
 
-            # Transient upstream errors (common on Dukascopy under load)
+            # Transient upstream errors (common on Dukascopy under load / Actions IPs)
             if resp.status_code in (502, 503, 504):
                 last_error = f"HTTP {resp.status_code}"
-                if attempt >= _MAX_429_ATTEMPTS:
+                if attempt >= _MAX_503_ATTEMPTS:
                     break
-                delay = _429_BACKOFF[min(attempt - 1, len(_429_BACKOFF) - 1)]
+                delay = _503_BACKOFF[min(attempt - 1, len(_503_BACKOFF) - 1)]
+                log.warning(
+                    "%s %s — sleep %.1fs (attempt %s/%s)",
+                    resp.status_code,
+                    url,
+                    delay,
+                    attempt,
+                    _MAX_503_ATTEMPTS,
+                )
                 await asyncio.sleep(delay)
                 continue
 

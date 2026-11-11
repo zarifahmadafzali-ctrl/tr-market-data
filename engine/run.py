@@ -170,7 +170,13 @@ def process_request(
         "done_days": list(req.get("done_days") or []),
         "failed_days": list(req.get("failed_days") or []),
         "skipped_days": list(req.get("skipped_days") or []),
+        "empty_days": list(req.get("empty_days") or list((req.get("progress") or {}).get("empty_days") or [])),
     }
+    # Prefer nested progress from queue file if present
+    if isinstance(req.get("progress"), dict):
+        for key in ("done_days", "failed_days", "skipped_days", "empty_days"):
+            if req["progress"].get(key):
+                progress[key] = list(req["progress"][key])
 
     def heartbeat(extra: dict[str, Any] | None = None) -> None:
         def mut(r: dict) -> dict:
@@ -231,7 +237,11 @@ def process_request(
             return {"status": STATUS_QUEUED, "next_day": day.isoformat(), "progress": progress}
 
         day_s = day.isoformat()
-        if day_s in progress["done_days"] or day_s in progress["skipped_days"]:
+        if (
+            day_s in progress["done_days"]
+            or day_s in progress["skipped_days"]
+            or day_s in progress.get("empty_days", [])
+        ):
             continue
 
         heartbeat({"current_day": day_s})
@@ -264,17 +274,82 @@ def process_request(
                     else None,
                 )
                 log.info("day %s download=%s archive=%s", day_s, status, arch.get("status"))
-                progress["done_days"].append(day_s)
+                if day_s not in progress["done_days"]:
+                    progress["done_days"].append(day_s)
+                if day_s in progress["failed_days"]:
+                    progress["failed_days"] = [d for d in progress["failed_days"] if d != day_s]
+            elif status == "EXPECTED_EMPTY":
+                # Weekend / holiday — not a failure; durable skip on resume
+                log.info("day %s status=EXPECTED_EMPTY (no market data)", day_s)
+                progress.setdefault("empty_days", [])
+                if day_s not in progress["empty_days"]:
+                    progress["empty_days"].append(day_s)
+                if day_s in progress["failed_days"]:
+                    progress["failed_days"] = [d for d in progress["failed_days"] if d != day_s]
             else:
                 log.warning("day %s status=%s", day_s, status)
-                progress["failed_days"].append(day_s)
+                if day_s not in progress["failed_days"]:
+                    progress["failed_days"].append(day_s)
         except Exception as e:  # noqa: BLE001
             log.exception("day %s failed: %s", day_s, e)
             progress["failed_days"].append(day_s)
         heartbeat({"current_day": day_s})
 
-    # Finished range
-    if progress["failed_days"] and not progress["done_days"] and not progress["skipped_days"]:
+    # Second pass: retry failed days once within the same Actions job if time allows
+    retry_list = list(progress.get("failed_days") or [])
+    if retry_list and (deadline - monotonic()) >= cfg.day_margin_sec:
+        log.info("retry pass for %s failed day(s): %s", len(retry_list), retry_list)
+        still_failed: list[str] = []
+        for day_s in retry_list:
+            remaining = deadline - monotonic()
+            if remaining < cfg.day_margin_sec:
+                still_failed.extend(
+                    d for d in retry_list[retry_list.index(day_s) :] if d not in still_failed
+                )
+                break
+            try:
+                day = _parse_day(day_s)
+                if is_indexed(symbol, day_s, db_path=cfg.sqlite_path, provider=cfg.provider):
+                    progress["done_days"].append(day_s)
+                    continue
+                result = day_runner(
+                    symbol,
+                    day,
+                    data_root=cfg.data_root,
+                    db_path=cfg.sqlite_path,
+                    provider=cfg.provider,
+                    force=False,
+                )
+                status = str(result.get("status") or "")
+                if status == "SUCCESS":
+                    arch = archive_day(
+                        symbol,
+                        day_s,
+                        db_path=cfg.sqlite_path,
+                        data_root=cfg.data_root,
+                        provider=cfg.provider,
+                        max_steps=cfg.max_archive_steps_per_day,
+                        requester_chat_id=chat if isinstance(chat, int) else None,
+                        requester_user_id=req.get("requester_user_id")
+                        if isinstance(req.get("requester_user_id"), int)
+                        else None,
+                    )
+                    log.info("retry day %s download=%s archive=%s", day_s, status, arch.get("status"))
+                    progress["done_days"].append(day_s)
+                elif status == "EXPECTED_EMPTY":
+                    progress.setdefault("empty_days", [])
+                    if day_s not in progress["empty_days"]:
+                        progress["empty_days"].append(day_s)
+                else:
+                    still_failed.append(day_s)
+            except Exception as e:  # noqa: BLE001
+                log.exception("retry day %s failed: %s", day_s, e)
+                still_failed.append(day_s)
+            heartbeat({"current_day": day_s, "phase": "retry"})
+        progress["failed_days"] = still_failed
+
+    # Finished range — if failures remain, re-queue for a later Actions run (preserve progress)
+    if progress["failed_days"] and not progress["done_days"] and not progress["skipped_days"] and not progress.get("empty_days"):
         final = STATUS_FAILED
     elif progress["failed_days"]:
         final = STATUS_PARTIAL
@@ -283,18 +358,35 @@ def process_request(
 
     def mut_done(r: dict) -> dict:
         r = dict(r)
-        r["status"] = final
-        r["finished_at"] = utc_now_iso()
         r["progress"] = progress
-        r.pop("next_day", None)
         r.pop("pause_reason", None)
+        if final == STATUS_PARTIAL and progress.get("failed_days"):
+            # Keep durable progress; make request runnable again for failed days only
+            r["status"] = STATUS_QUEUED
+            r["next_day"] = progress["failed_days"][0]
+            r["finished_at"] = None
+            r["requeue_reason"] = "retry_failed_days"
+        else:
+            r["status"] = final
+            r["finished_at"] = utc_now_iso()
+            r.pop("next_day", None)
+            r.pop("requeue_reason", None)
         return r
 
     queue.update(rid, mut_done, message=f"queue: {final} {rid}")
+    if final == STATUS_PARTIAL and progress.get("failed_days") and redispatch:
+        redispatch(rid)
+        log.info("redispatched request %s to retry %s failed day(s)", rid, len(progress["failed_days"]))
     notifier.send_message(
         chat if isinstance(chat, int) else None,
         f"Engine {final}: {symbol} done={len(progress['done_days'])} "
-        f"skipped={len(progress['skipped_days'])} failed={len(progress['failed_days'])}",
+        f"empty={len(progress.get('empty_days') or [])} "
+        f"skipped={len(progress['skipped_days'])} failed={len(progress['failed_days'])}"
+        + (
+            f" (requeued for retry from {progress['failed_days'][0]})"
+            if final == STATUS_PARTIAL and progress.get("failed_days")
+            else ""
+        ),
     )
     return {"status": final, "progress": progress}
 
